@@ -117,7 +117,11 @@ internal class CombinedView: NSObject, NSGestureRecognizerDelegate {
     private func visibilityCallback(_ state: Bool) {}
     
     @objc private func handleClick() {
-        if self.combinedModulesPopup {
+        var combined = self.combinedModulesPopup
+        if let event = NSApp.currentEvent, event.type == .leftMouseDown, event.modifierFlags.contains(.option) {
+            combined.toggle()
+        }
+        if combined {
             self.togglePopup()
         } else {
             self.openModulePopup()
