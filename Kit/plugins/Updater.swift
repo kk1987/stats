@@ -37,7 +37,7 @@ internal struct Version {
 
 public class Updater {
     private let github: URL
-    private let server: URL
+    private let server: URL?
     
     private let appName: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as! String
     private let currentVersion: String = "v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as! String)"
@@ -61,9 +61,9 @@ public class Updater {
         }
     }
     
-    public init(github: String, url: String) {
+    public init(github: String, url: String? = nil) {
         self.github = URL(string: "https://api.github.com/repos/\(github)/releases/latest")!
-        self.server = URL(string: "\(url)?macOS=\(ProcessInfo().operatingSystemVersion.getFullVersion())")!
+        self.server = url.flatMap { URL(string: "\($0)?macOS=\(ProcessInfo().operatingSystemVersion.getFullVersion())") }
     }
     
     deinit {
@@ -86,7 +86,24 @@ public class Updater {
             self.lastCheckTS = Int(Date().timeIntervalSince1970)
         }
         
-        self.fetchRelease(uri: self.server) { (result, err) in
+        guard let server = self.server else {
+            self.fetchRelease(uri: self.github) { (result, err) in
+                guard let result = result, err == nil else {
+                    completion(nil, err)
+                    return
+                }
+
+                completion(version_s(
+                    current: self.currentVersion,
+                    latest: result.tag,
+                    newest: isNewestVersion(currentVersion: self.currentVersion, latestVersion: result.tag),
+                    url: result.url
+                ), nil)
+            }
+            return
+        }
+
+        self.fetchRelease(uri: server) { (result, err) in
             guard let result = result, err == nil else {
                 self.fetchRelease(uri: self.github) { (result, err) in
                     guard let result = result, err == nil else {
