@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  TEAM_ID: A7RACU4N7S
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)/Contents/Developer"
+
+      - name: Import Developer ID certificate
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          rm "$CERT_PATH"
+
+      - name: Build and sign
+        run: |
+          xcodebuild -project Stats.xcodeproj -scheme Stats -configuration Release \
+            -archivePath "$RUNNER_TEMP/Stats.xcarchive" archive \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Developer ID Application" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            OTHER_CODE_SIGN_FLAGS="--timestamp"
+
+      - name: Notarize and staple
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          APP="$RUNNER_TEMP/Stats.xcarchive/Products/Applications/Stats.app"
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/Stats-notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/Stats-notarize.zip" \
+            --apple-id "$NOTARY_APPLE_ID" --team-id "$TEAM_ID" --password "$NOTARY_PASSWORD" --wait
+          xcrun stapler staple "$APP"
+          spctl -a -t exec -vv "$APP"
+
+      # The in-app updater only recognizes a release asset named exactly
+      # Stats.dmg (Updater.fetchRelease matches on "\(appName).dmg").
+      - name: Package Stats.dmg
+        run: |
+          APP="$RUNNER_TEMP/Stats.xcarchive/Products/Applications/Stats.app"
+          brew install create-dmg
+          create-dmg \
+            --volname Stats \
+            --background "./Stats/Supporting Files/background.png" \
+            --window-pos 200 120 --window-size 500 320 --icon-size 80 \
+            --icon "Stats.app" 125 175 --hide-extension "Stats.app" \
+            --app-drop-link 375 175 --no-internet-enable \
+            Stats.dmg "$APP" \
+          || {
+            echo "create-dmg failed, falling back to plain hdiutil image"
+            STAGING="$RUNNER_TEMP/dmg"
+            mkdir -p "$STAGING"
+            cp -R "$APP" "$STAGING/"
+            ln -s /Applications "$STAGING/Applications"
+            hdiutil create -volname Stats -srcfolder "$STAGING" -ov -format UDZO Stats.dmg
+          }
+          ditto -c -k --keepParent "$APP" Stats.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stats
+          path: |
+            Stats.dmg
+            Stats.zip
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" Stats.dmg Stats.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
