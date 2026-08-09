@@ -687,7 +687,14 @@ public func isNewestVersion(currentVersion: String, latestVersion: String) -> Bo
             latest.beta = Int(beta.replacingOccurrences(of: "beta", with: "")) ?? 0
         }
     }
-    
+
+    if currentArray.count > 3 {
+        current.fork = Int(currentArray[3]) ?? 0
+    }
+    if latestArray.count > 3 {
+        latest.fork = Int(latestArray[3]) ?? 0
+    }
+
     // current is not beta + latest is not beta
     if current.beta == nil && latest.beta == nil {
         if latest.major > current.major {
@@ -701,8 +708,12 @@ public func isNewestVersion(currentVersion: String, latestVersion: String) -> Bo
         if latest.patch > current.patch && latest.minor >= current.minor && latest.major >= current.major {
             return true
         }
+
+        if latest.fork > current.fork && latest.patch >= current.patch && latest.minor >= current.minor && latest.major >= current.major {
+            return true
+        }
     }
-    
+
     // current version is beta + last version is not beta
     if current.beta != nil && latest.beta == nil {
         if latest.major > current.major {

@@ -31,7 +31,9 @@ internal struct Version {
     var major: Int = 0
     var minor: Int = 0
     var patch: Int = 0
-    
+    // fourth component used by fork releases (x.y.z.n), 0 for upstream versions
+    var fork: Int = 0
+
     var beta: Int? = nil
 }
 

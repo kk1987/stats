@@ -16,6 +16,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Select latest Xcode
         run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)/Contents/Developer"
@@ -89,12 +91,25 @@ jobs:
             Stats.dmg
             Stats.zip
 
+      # Release notes are always written against the nearest upstream release
+      # tag (3-component vX.Y.Z) reachable from HEAD, never against a previous
+      # fork tag, so every release page shows the full delta over upstream.
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          BASELINE="$(git tag --merged HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+          {
+            echo "Unofficial fork build — see the [README](https://github.com/${GITHUB_REPOSITORY}#readme) for what this fork is. All credit for Stats itself goes to [@exelban](https://github.com/exelban)."
+            echo
+            echo "**Baseline: upstream [${BASELINE}](https://github.com/exelban/stats/releases/tag/${BASELINE}).** Everything below is what this build carries on top ([full diff](https://github.com/${GITHUB_REPOSITORY}/compare/${BASELINE}...${GITHUB_REF_NAME})):"
+            echo
+            git log --reverse --no-merges --format='- %s' "${BASELINE}..HEAD"
+            echo
+            echo "Problems with this build → [report here](https://github.com/${GITHUB_REPOSITORY}/issues/new?template=bug_report.md), not to the upstream project."
+          } > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" Stats.dmg Stats.zip \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes
+            --notes-file "$RUNNER_TEMP/notes.md"
