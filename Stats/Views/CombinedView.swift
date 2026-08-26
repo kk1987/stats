@@ -98,10 +98,7 @@ internal class CombinedView: NSObject, NSGestureRecognizerDelegate {
             if i != 0 {
                 w += self.spacing
                 if self.separator {
-                    let separator = NSView(frame: NSRect(x: w, y: 3, width: 1, height: Constants.Widget.height-6))
-                    separator.wantsLayer = true
-                    separator.layer?.backgroundColor = (separator.isDarkMode ? NSColor.white : NSColor.black).cgColor
-                    self.view.addSubview(separator)
+                    self.view.addSubview(SeparatorLineView(frame: NSRect(x: w, y: 3, width: 1, height: Constants.Widget.height-6)))
                     w += 3 + self.spacing
                 }
             }
@@ -193,6 +190,28 @@ internal class CombinedView: NSObject, NSGestureRecognizerDelegate {
     
     @objc private func listenForModuleRearrrange() {
         self.recalculate()
+    }
+}
+
+private class SeparatorLineView: NSView {
+    override var wantsUpdateLayer: Bool { true }
+    
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        self.wantsLayer = true
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    override func updateLayer() {
+        self.layer?.backgroundColor = (self.isDarkMode ? NSColor.white : NSColor.black).cgColor
+    }
+    
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        self.needsDisplay = true
     }
 }
 
