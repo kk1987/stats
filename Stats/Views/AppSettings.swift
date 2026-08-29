@@ -298,7 +298,14 @@ class ApplicationSettings: NSStackView {
         statsVersion.stringValue = "\(localizedString("Version")) \(versionNumber)"
         statsVersion.isSelectable = true
         statsVersion.toolTip = "\(localizedString("Build number")) \(buildNumber)"
-        
+
+        let forkNotice: NSTextField = TextView(frame: NSRect(x: 0, y: 0, width: view.frame.width, height: 14))
+        forkNotice.alignment = .center
+        forkNotice.font = NSFont.systemFont(ofSize: 10, weight: .regular)
+        forkNotice.textColor = .secondaryLabelColor
+        forkNotice.stringValue = "unofficial fork · github.com/kk1987/stats"
+        forkNotice.isSelectable = true
+
         let updateButton: NSButton = NSButton()
         updateButton.title = localizedString("Check for update")
         updateButton.bezelStyle = .rounded
@@ -308,6 +315,7 @@ class ApplicationSettings: NSStackView {
         container.addRow(with: [iconView])
         container.addRow(with: [statsName])
         container.addRow(with: [statsVersion])
+        container.addRow(with: [forkNotice])
         container.addRow(with: [updateButton])
         
         container.row(at: 1).height = 22
