@@ -698,7 +698,14 @@ public func isNewestVersion(currentVersion: String, latestVersion: String) -> Bo
             latest.beta = Int(beta.replacingOccurrences(of: "beta", with: "")) ?? 0
         }
     }
-    
+
+    if currentArray.count > 3 {
+        current.fork = Int(currentArray[3]) ?? 0
+    }
+    if latestArray.count > 3 {
+        latest.fork = Int(latestArray[3]) ?? 0
+    }
+
     // current is not beta + latest is not beta
     if current.beta == nil && latest.beta == nil {
         if latest.major > current.major {
@@ -712,8 +719,12 @@ public func isNewestVersion(currentVersion: String, latestVersion: String) -> Bo
         if latest.patch > current.patch && latest.minor >= current.minor && latest.major >= current.major {
             return true
         }
+
+        if latest.fork > current.fork && latest.patch >= current.patch && latest.minor >= current.minor && latest.major >= current.major {
+            return true
+        }
     }
-    
+
     // current version is beta + last version is not beta
     if current.beta != nil && latest.beta == nil {
         if latest.major > current.major {
@@ -1125,7 +1136,7 @@ public class SMCHelper {
     
     private let id: String = "eu.exelban.Stats.SMC.Helper"
     private let plistName: String = "eu.exelban.Stats.SMC.Helper.plist"
-    
+
     public var isInstalled: Bool {
         if #available(macOS 13, *) {
             return SMAppService.daemon(plistName: self.plistName).status == .enabled
@@ -1184,7 +1195,7 @@ public class SMCHelper {
             self.cleanupLegacyInstall()
             guard SMAppService.daemon(plistName: self.plistName).status == .enabled else { return }
         }
-        
+
         let helperURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/LaunchServices/eu.exelban.Stats.SMC.Helper")
         guard let helperBundleInfo = CFBundleCopyInfoDictionaryForURL(helperURL as CFURL) as? [String: Any],
               let helperVersion = helperBundleInfo["CFBundleShortVersionString"] as? String,
@@ -1235,7 +1246,7 @@ public class SMCHelper {
                 completion(.enabled)
                 return
             }
-            
+
             do {
                 try service.register()
             } catch {
@@ -1260,7 +1271,7 @@ public class SMCHelper {
                     return
                 }
             }
-            
+
             switch service.status {
             case .enabled:
                 completion(.enabled)
@@ -1345,13 +1356,13 @@ public class SMCHelper {
                 self?.connection = nil
             }
         }
-        
+
         self.connection = connection
         self.connection?.resume()
-        
+
         return self.connection
     }
-    
+
     private func helper(_ completion: ((Bool) -> Void)?) -> HelperProtocol? {
         guard let helper = self.helperConnection() else {
             completion?(false)
