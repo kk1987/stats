@@ -1,3 +1,20 @@
+# Stats — unofficial fork
+
+> [!IMPORTANT]
+> This is an **unofficial fork** of [exelban/stats](https://github.com/exelban/stats), maintained by [@kk1987](https://github.com/kk1987). It exists mainly to provide working builds on beta versions of macOS, which the upstream project [explicitly does not support](https://github.com/exelban/stats/issues/3337).
+>
+> **If you hit a problem while running a build of this fork, please report it [here](https://github.com/kk1987/stats/issues) — do not report it to the upstream project.**
+
+This fork currently carries, on top of the latest upstream release:
+
+- All unreleased fixes from upstream `master`, including the [combined-modules popup click-routing fix](https://github.com/exelban/stats/commit/aff31754) needed on macOS 27 (reported in [#3337](https://github.com/exelban/stats/issues/3337) / [#3456](https://github.com/exelban/stats/issues/3456), with community diagnosis and patches by [@LouYu2015](https://github.com/LouYu2015) and @notluquis).
+- [exelban/stats#3229](https://github.com/exelban/stats/pull/3229) by [@IonBazan](https://github.com/IonBazan): with Combined modules enabled, Option-click inverts the Combined details setting for that click.
+- The in-app updater checks this fork's releases instead of the official ones, so an update never silently replaces a fork build with an official one.
+
+The fork tracks upstream releases and re-applies its patches on top; patches are dropped as they land upstream. All credit for Stats itself goes to [Serhiy Mytrovtsiy (@exelban)](https://github.com/exelban). The original README follows below.
+
+---
+
 # Stats
 
 <a href="https://github.com/exelban/stats/releases"><p align="center"><img src="https://github.com/exelban/stats/raw/master/Stats/Supporting%20Files/Assets.xcassets/AppIcon.appiconset/icon_256x256.png" width="120"></p></a>
