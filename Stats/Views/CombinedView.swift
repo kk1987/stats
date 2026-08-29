@@ -114,7 +114,14 @@ internal class CombinedView: NSObject, NSGestureRecognizerDelegate {
     private func visibilityCallback(_ state: Bool) {}
     
     @objc private func handleClick() {
-        if self.combinedModulesPopup {
+        var combined = self.combinedModulesPopup
+        // On macOS 27 the mouse event delivered through the status-item button
+        // action carries empty modifierFlags, so read the live keyboard state
+        // instead (same approach as resolving the module from mouseLocation).
+        if let event = NSApp.currentEvent, event.type == .leftMouseDown, NSEvent.modifierFlags.contains(.option) {
+            combined.toggle()
+        }
+        if combined {
             self.togglePopup()
         } else {
             self.openModulePopup()
