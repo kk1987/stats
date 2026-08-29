@@ -1125,7 +1125,11 @@ public class SMCHelper {
     
     private let id: String = "eu.exelban.Stats.SMC.Helper"
     private let plistName: String = "eu.exelban.Stats.SMC.Helper.plist"
-    
+    // CFBundleVersion of the app bundle that last registered the daemon (see reregisterIfBundleChanged).
+    private let registeredBundleVersionKey: String = "SMCHelper_registeredBundleVersion"
+    // Set while a re-registration is in flight (between unregister and a successful register).
+    private let reregisterPendingKey: String = "SMCHelper_reregisterPending"
+
     public var isInstalled: Bool {
         if #available(macOS 13, *) {
             return SMAppService.daemon(plistName: self.plistName).status == .enabled
@@ -1182,9 +1186,22 @@ public class SMCHelper {
     public func checkForUpdate() {
         if #available(macOS 13, *) {
             self.cleanupLegacyInstall()
-            guard SMAppService.daemon(plistName: self.plistName).status == .enabled else { return }
+            // register/unregister are blocking calls into smd; keep them off the main thread at launch.
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard let self else { return }
+                let service = SMAppService.daemon(plistName: self.plistName)
+                self.recoverInterruptedReregistration(service)
+                guard service.status == .enabled else { return }
+                self.reregisterIfBundleChanged()
+                self.checkHelperVersion()
+            }
+            return
         }
-        
+
+        self.checkHelperVersion()
+    }
+
+    private func checkHelperVersion() {
         let helperURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/LaunchServices/eu.exelban.Stats.SMC.Helper")
         guard let helperBundleInfo = CFBundleCopyInfoDictionaryForURL(helperURL as CFURL) as? [String: Any],
               let helperVersion = helperBundleInfo["CFBundleShortVersionString"] as? String,
@@ -1204,15 +1221,102 @@ public class SMCHelper {
         }
     }
     
+    /// launchd resolves the daemon's relative `BundleProgram` through the app bundle
+    /// (bundle id + CFBundleVersion) captured when the daemon was registered. After an
+    /// in-place update that record points at a bundle version that no longer exists, so
+    /// every launch attempt fails with "Could not find and/or execute program specified
+    /// by service" while `SMAppService.status` still reports `.enabled`. Re-register the
+    /// daemon whenever the running bundle version differs from the one that registered it.
+    @available(macOS 13, *)
+    private func reregisterIfBundleChanged() {
+        let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        let registered = UserDefaults.standard.string(forKey: self.registeredBundleVersionKey)
+        guard registered != current else { return }
+
+        NSLog("SMC helper was registered by bundle version \(registered ?? "unknown"), current is \(current); re-registering daemon")
+        self.connection?.invalidate()
+        self.connection = nil
+
+        let service = SMAppService.daemon(plistName: self.plistName)
+        UserDefaults.standard.set(true, forKey: self.reregisterPendingKey)
+        do {
+            try service.unregister()
+        } catch {
+            NSLog("failed to unregister SMC helper daemon before re-registering: \(error.localizedDescription)")
+        }
+        _ = self.waitForStatus(service, timeout: 5) { $0 != .enabled }
+
+        if self.registerWithRetry(service) {
+            NSLog("SMC helper daemon re-registered for bundle version \(current)")
+        } else {
+            NSLog("SMC helper daemon re-registration did not reach the enabled state (status: \(service.status.rawValue))")
+        }
+    }
+
+    /// Background Task Management applies an unregister asynchronously: `status` already reports
+    /// `.notRegistered` while the item is still being flipped to disabled, and a register() that
+    /// arrives in that window is answered with "Job is not allowed to bootstrap" and does nothing.
+    /// Give BTM time to settle and retry; an item the user previously allowed is re-enabled by
+    /// register() without any prompt. Returns true once the daemon is enabled.
+    @available(macOS 13, *)
+    private func registerWithRetry(_ service: SMAppService, attempts: Int = 10, delay: UInt32 = 2_000_000) -> Bool {
+        for attempt in 1...attempts {
+            usleep(delay)
+            do {
+                try service.register()
+            } catch {
+                NSLog("SMC helper daemon register attempt \(attempt) failed: \(error.localizedDescription)")
+            }
+            if self.waitForStatus(service, timeout: 3, until: { $0 == .enabled }) {
+                self.rememberRegisteredBundleVersion()
+                UserDefaults.standard.removeObject(forKey: self.reregisterPendingKey)
+                return true
+            }
+        }
+        return false
+    }
+
+    /// If the app quit (or the register call raced BTM) between unregister() and a successful
+    /// register(), the daemon is left unregistered even though the user already allowed it.
+    /// register() re-enables such an item silently, so retry it instead of asking for approval again.
+    @available(macOS 13, *)
+    private func recoverInterruptedReregistration(_ service: SMAppService) {
+        guard UserDefaults.standard.bool(forKey: self.reregisterPendingKey), service.status != .enabled else { return }
+        NSLog("SMC helper re-registration was interrupted (status: \(service.status.rawValue)); registering again")
+        if self.registerWithRetry(service) {
+            NSLog("SMC helper daemon recovered")
+        }
+    }
+
+    @available(macOS 13, *)
+    @discardableResult
+    private func waitForStatus(_ service: SMAppService, timeout: TimeInterval, until condition: (SMAppService.Status) -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(service.status) {
+            if Date() > deadline { return false }
+            usleep(100_000)
+        }
+        return true
+    }
+
+    private func rememberRegisteredBundleVersion() {
+        let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        UserDefaults.standard.set(current, forKey: self.registeredBundleVersionKey)
+    }
+
     public func install(completion: @escaping (_ state: SMCHelperInstallState) -> Void) {
         if #available(macOS 13, *) {
             self.cleanupLegacyInstall()
             let service = SMAppService.daemon(plistName: self.plistName)
             if service.status == .enabled {
-                completion(.enabled)
+                // Off the main thread: re-registration may take a few seconds (see registerWithRetry).
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    self?.reregisterIfBundleChanged()
+                    completion(.enabled)
+                }
                 return
             }
-            
+
             do {
                 try service.register()
             } catch {
@@ -1237,7 +1341,10 @@ public class SMCHelper {
                     return
                 }
             }
-            
+
+            // register() succeeded: the daemon record now belongs to this bundle version.
+            self.rememberRegisteredBundleVersion()
+
             switch service.status {
             case .enabled:
                 completion(.enabled)
@@ -1322,20 +1429,34 @@ public class SMCHelper {
                 self?.connection = nil
             }
         }
-        
+        // The helper exits when its last client goes away and launchd re-registration replaces
+        // the endpoint; drop the cached connection so the next call performs a fresh lookup.
+        connection.interruptionHandler = { [weak self] in
+            NSLog("SMC helper connection interrupted, dropping cached connection")
+            self?.dropConnection()
+        }
+
         self.connection = connection
         self.connection?.resume()
-        
+
         return self.connection
     }
-    
+
+    private func dropConnection() {
+        OperationQueue.main.addOperation { [weak self] in
+            self?.connection?.invalidate()
+            self?.connection = nil
+        }
+    }
+
     private func helper(_ completion: ((Bool) -> Void)?) -> HelperProtocol? {
         guard let helper = self.helperConnection() else {
             completion?(false)
             return nil
         }
-        guard let service = helper.remoteObjectProxyWithErrorHandler({ error in
-            print(error)
+        guard let service = helper.remoteObjectProxyWithErrorHandler({ [weak self] error in
+            NSLog("SMC helper XPC error: \(error.localizedDescription)")
+            self?.dropConnection()
         }) as? HelperProtocol else {
             completion?(false)
             return nil
@@ -1358,6 +1479,8 @@ public class SMCHelper {
             } catch {
                 print("failed to unregister SMC helper daemon: \(error.localizedDescription)")
             }
+            UserDefaults.standard.removeObject(forKey: self.registeredBundleVersionKey)
+            UserDefaults.standard.removeObject(forKey: self.reregisterPendingKey)
             self.connection?.invalidate()
             self.connection = nil
             if !silent {
