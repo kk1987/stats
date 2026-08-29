@@ -294,7 +294,7 @@ private class UpdateView: NSView {
     
     @objc private func changelog() {
         if let version = self.version {
-            NSWorkspace.shared.open(URL(string: "https://github.com/exelban/stats/releases/tag/\(version.latest)")!)
+            NSWorkspace.shared.open(URL(string: "https://github.com/kk1987/stats/releases/tag/\(version.latest)")!)
         }
     }
     
