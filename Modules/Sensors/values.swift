@@ -298,6 +298,15 @@ public struct Fan: Sensor_p, Codable {
         Store.shared.string(key: "sensor_\(self.key)_notification", defaultValue: "")
     }
     
+    // The popup carries its own fan value style, but unless it was explicitly
+    // set it should follow the module-level "Fan value" setting instead of a
+    // hardcoded default — the two identically named selects are an upstream
+    // UX trap otherwise.
+    public static func popupDisplayStyle() -> FanValue {
+        let moduleValue = Store.shared.string(key: "Sensors_fanValue", defaultValue: FanValue.percentage.rawValue)
+        return FanValue(rawValue: Store.shared.string(key: "Sensors_popup_fanValue", defaultValue: moduleValue)) ?? .percentage
+    }
+
     public func displayValue(_ style: FanValue) -> String {
         switch style {
         case .rpm: return self.formattedValue

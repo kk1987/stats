@@ -30,7 +30,7 @@ internal class Popup: PopupWrapper {
     public init() {
         super.init(ModuleType.sensors, frame: NSRect( x: 0, y: 0, width: Constants.Popup.width, height: 0))
         
-        self.fanValueState = FanValue(rawValue: Store.shared.string(key: "Sensors_popup_fanValue", defaultValue: self.fanValueState.rawValue)) ?? .percentage
+        self.fanValueState = Fan.popupDisplayStyle()
         
         self.orientation = .vertical
         self.spacing = 0
@@ -262,7 +262,7 @@ internal class SensorView: NSStackView {
     private var openned: Bool = false
     
     private var fanValueState: FanValue {
-        FanValue(rawValue: Store.shared.string(key: "Sensors_popup_fanValue", defaultValue: FanValue.percentage.rawValue)) ?? .percentage
+        Fan.popupDisplayStyle()
     }
     
     public init(_ sensor: Sensor_p, width: CGFloat, toggleable: Bool = true, callback: @escaping (() -> Void)) {
@@ -472,7 +472,7 @@ internal class FanView: NSStackView {
     private var helperButton: NSButton? = nil
     private var approvalPollTimer: Timer? = nil
     private var fanValue: FanValue {
-        FanValue(rawValue: Store.shared.string(key: "Sensors_popup_fanValue", defaultValue: FanValue.percentage.rawValue)) ?? .percentage
+        Fan.popupDisplayStyle()
     }
     
     private var horizontalMargin: CGFloat {
