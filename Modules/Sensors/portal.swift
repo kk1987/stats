@@ -67,7 +67,7 @@ public class Portal: PortalWrapper {
     
     private func formattedValue(_ sensor: Sensor_p) -> String {
         if let fan = sensor as? Fan {
-            return self.fanValueState == .percentage ? "\(fan.percentage)%" : fan.formattedValue
+            return fan.displayValue(self.fanValueState)
         }
         return sensor.formattedPopupValue
     }
