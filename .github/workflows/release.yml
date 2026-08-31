@@ -105,7 +105,15 @@ jobs:
           BASELINE="$(git tag --merged HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
           git remote add upstream https://github.com/exelban/stats.git
           git fetch --quiet upstream master
-          TAG_BODY="$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")"
+          # actions/checkout materializes the pushed tag as a lightweight ref
+          # pointing at the commit, so %(contents:body) would return the commit
+          # body instead of the tag annotation. Re-fetch the real tag object
+          # and only use its body when the ref is a genuine annotated tag.
+          git fetch --quiet --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          TAG_BODY=""
+          if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" = "tag" ]; then
+            TAG_BODY="$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")"
+          fi
           FORK_LINES=""
           UPSTREAM_LINES=""
           while read -r SHA SUBJECT; do
