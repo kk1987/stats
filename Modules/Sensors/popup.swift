@@ -509,6 +509,7 @@ internal class FanView: NSStackView {
         NotificationCenter.default.addObserver(self, selector: #selector(self.syncFanSpeed), name: .syncFansControl, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(self.changeHelperState), name: .fanHelperState, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(self.controlCallback), name: .toggleFanControl, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(self.fanModeReverted), name: .fanModeReverted, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(self.recheckHelperState), name: NSApplication.didBecomeActiveNotification, object: nil)
         
         if let fanMode = self.fan.customMode, self.speedState && fanMode != FanMode.automatic {
@@ -533,6 +534,7 @@ internal class FanView: NSStackView {
         NotificationCenter.default.removeObserver(self, name: .syncFansControl, object: nil)
         NotificationCenter.default.removeObserver(self, name: .fanHelperState, object: nil)
         NotificationCenter.default.removeObserver(self, name: .toggleFanControl, object: nil)
+        NotificationCenter.default.removeObserver(self, name: .fanModeReverted, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSApplication.didBecomeActiveNotification, object: nil)
     }
     
@@ -854,11 +856,20 @@ internal class FanView: NSStackView {
     
     @objc private func sleepListener() {
         guard SMCHelper.shared.isActive(), let mode = self.fan.customMode, !mode.isAutomatic else { return }
-        
+
         self.willSleepMode = mode
         self.willSleepSpeed = self.fan.customSpeed
         SMCHelper.shared.setFanMode(fan.id, mode: FanMode.automatic.rawValue)
         self.modeButtons?.setMode(.automatic)
+    }
+
+    // The module gave up re-applying a reclaimed manual mode: the stored intent
+    // is already cleared, sync the controls back to the real (automatic) state.
+    @objc private func fanModeReverted(_ notification: Notification) {
+        guard let id = notification.userInfo?["id"] as? Int, id == self.fan.id else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.modeButtons?.setMode(.automatic)
+        }
     }
     
     @objc private func syncFanSpeed(_ notification: Notification) {

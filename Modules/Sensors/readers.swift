@@ -140,7 +140,15 @@ internal class SensorsReader: Reader<Sensors_List> {
             }
             sensors[i].value = newValue
         }
-        
+
+        // Fan mode can change outside the app (macOS reclaims manual control),
+        // so it has to be re-read on every cycle, not only at discovery.
+        for i in sensors.indices {
+            guard var fan = sensors[i] as? Fan, !fan.isComputed else { continue }
+            fan.mode = self.getFanMode(fan.id)
+            sensors[i] = fan
+        }
+
         var cpuSensors = sensors.filter({ $0.group == .CPU && $0.type == .temperature && $0.average }).map{ $0.value }
         var gpuSensors = sensors.filter({ $0.group == .GPU && $0.type == .temperature && $0.average }).map{ $0.value }
         let fanSensors = sensors.filter({ $0.type == .fan && !$0.isComputed })
