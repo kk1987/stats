@@ -21,7 +21,7 @@ public class Portal: PortalWrapper {
         Store.shared.bool(key: "Sensors_unknown", defaultValue: false)
     }
     private var fanValueState: FanValue {
-        FanValue(rawValue: Store.shared.string(key: "Sensors_popup_fanValue", defaultValue: FanValue.percentage.rawValue)) ?? .percentage
+        Fan.popupDisplayStyle()
     }
     
     public override func load() {
