@@ -356,7 +356,7 @@ internal class SensorView: NSStackView {
     public func update(_ sensor: Sensor_p) {
         var value = sensor.formattedPopupValue
         if let fan = sensor as? Fan {
-            value = self.fanValueState == .percentage ? "\(fan.percentage)%" : fan.formattedValue
+            value = fan.displayValue(self.fanValueState)
         }
         self.valueView.update(value)
     }
@@ -641,7 +641,7 @@ internal class FanView: NSStackView {
         let valueField: NSTextField = TextView()
         valueField.font = NSFont.systemFont(ofSize: 13, weight: .regular)
         valueField.alignment = .trailing
-        valueField.stringValue = self.fanValue == .percentage ? "\(self.fan.percentage)%" : self.fan.formattedValue
+        valueField.stringValue = self.fan.displayValue(self.fanValue)
         valueField.toolTip = "\(value)"
         
         let percentage = self.fan.percentage < 0 ? 0 : self.fan.percentage
@@ -987,7 +987,7 @@ internal class FanView: NSStackView {
                     if self.fan.maxSpeed == 1 || self.fan.maxSpeed == 0 {
                         newValue = "\(Int(value.value)) RPM"
                     } else {
-                        newValue = self.fanValue == .percentage ? "\(value.percentage)%" : value.formattedValue
+                        newValue = value.displayValue(self.fanValue)
                     }
                 }
                 
