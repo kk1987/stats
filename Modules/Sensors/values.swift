@@ -298,6 +298,14 @@ public struct Fan: Sensor_p, Codable {
         Store.shared.string(key: "sensor_\(self.key)_notification", defaultValue: "")
     }
     
+    public func displayValue(_ style: FanValue) -> String {
+        switch style {
+        case .rpm: return self.formattedValue
+        case .percentage: return "\(self.percentage)%"
+        case .combined: return "\(Int(self.value)) (\(self.percentage)%)"
+        }
+    }
+
     public var customSpeed: Int? {
         get {
             if !Store.shared.exist(key: "fan_\(self.id)_speed") {
