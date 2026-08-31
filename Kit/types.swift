@@ -383,10 +383,12 @@ extension Scale: CaseIterable {
 public enum FanValue: String {
     case rpm
     case percentage
+    case combined
 }
 public let FanValues: [KeyValue_t] = [
     KeyValue_t(key: "rpm", value: "RPM", additional: FanValue.rpm),
-    KeyValue_t(key: "percentage", value: "Percentage", additional: FanValue.percentage)
+    KeyValue_t(key: "percentage", value: "Percentage", additional: FanValue.percentage),
+    KeyValue_t(key: "combined", value: "RPM (%)", additional: FanValue.combined)
 ]
 
 public var LineChartHistory: [KeyValue_p] = [
