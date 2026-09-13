@@ -1858,6 +1858,145 @@ final class HistoryTests: XCTestCase {
                        [.notRunning, .asleep, .asleep])
     }
 
+    // MARK: - the Reader.callback hook
+    //
+    // The one line in `Kit/module/reader.swift` that connects every reader in
+    // the app to the recorder. These drive a real `Reader` subclass through its
+    // real `callback` rather than calling `ingest` directly, because everything
+    // worth getting wrong there — which identity is passed, whose interval is
+    // passed, and whether the master switch is consulted before any of it — is
+    // invisible to a test that does the call itself.
+    //
+    // The `Tests` bundle is hosted by Stats itself, so while these run the real
+    // app has launched, mounted its modules and is ticking a dozen real readers
+    // through the very line under test. Those samples land in the probe for as
+    // long as the hook points at it, so nothing here asserts a lane count or a
+    // lane index: the hook's own lane is found by its label, and everything
+    // else in the archive belongs to whatever the machine was doing.
+
+    func testReaderCallbackFeedsTheRecorder() throws {
+        let probe = try self.probe(preset: .minimal)
+        defer { probe.recorder.stop() }
+        let reader = self.hookedReader(probe, interval: 1)
+
+        let first = HistoryClock.bucketIndex(probe.now, step: HistoryTier.t0.step)
+        reader.callback(HookPayload(value: 42))
+
+        // The reader's own identity, not the payload's type: `CapacityReader`,
+        // `ActivityReader` and `SMARTReader` are all `Reader<Disks>` (§2).
+        XCTAssertEqual(HookPayload.log.keys, [HistoryReaderKey(module: .CPU, name: "HookReader")])
+
+        probe.advance(HistoryRecorder.commitInterval)
+        probe.recorder.commitNow()
+
+        let t0 = try XCTUnwrap(probe.store.archive(.t0))
+        let lane = try XCTUnwrap(self.hookLane(t0))
+        let slot = try XCTUnwrap(t0.slot(bucket: first, lane: lane))
+        XCTAssertEqual(slot.count, 1)
+        XCTAssertEqual(slot.max, 42)
+        XCTAssertEqual(slot.reason, .measured)
+        // A one-second interval stands for one second, so nothing is attributed
+        // behind the bucket the sample landed in.
+        XCTAssertNil(t0.slot(bucket: first &- 1, lane: lane))
+    }
+
+    /// The hook passes `self.interval`, which is what turns a 60 s reader into
+    /// six filled 10 s buckets instead of one filled and five gaps (§2). A hook
+    /// that passed `nil` would look identical in the test above and wrong here.
+    func testReaderCallbackForwardsTheReaderInterval() throws {
+        let probe = try self.probe(preset: .minimal)
+        defer { probe.recorder.stop() }
+        let reader = self.hookedReader(probe, interval: 60)
+
+        let first = HistoryClock.bucketIndex(probe.now, step: HistoryTier.t0.step)
+        reader.callback(HookPayload(value: 42))
+        probe.advance(HistoryRecorder.commitInterval)
+        probe.recorder.commitNow()
+
+        let t0 = try XCTUnwrap(probe.store.archive(.t0))
+        let lane = try XCTUnwrap(self.hookLane(t0))
+        for offset in 0...6 {
+            let slot = try XCTUnwrap(t0.slot(bucket: first &- UInt32(offset), lane: lane),
+                                     "bucket \(first) - \(offset) was left as a gap")
+            XCTAssertEqual(slot.max, 42)
+        }
+        XCTAssertNil(t0.slot(bucket: first &- 7, lane: lane))
+    }
+
+    /// §2: the master switch off costs a predicated branch. The payload is
+    /// never asked for its lanes, so a reader that emits nothing — Clock's
+    /// `Reader<Date>`, every `ProcessReader` — pays nothing either.
+    func testTheMasterSwitchOffStopsTheHookBeforeExtraction() throws {
+        let probe = try self.probe(preset: .minimal)
+        defer { probe.recorder.stop() }
+        let reader = self.hookedReader(probe, interval: 1)
+
+        probe.recorder.setRecording(false)
+        probe.recorder.waitUntilIdle()
+        reader.callback(HookPayload(value: 42))
+
+        XCTAssertTrue(HookPayload.log.keys.isEmpty)
+        probe.advance(HistoryRecorder.commitInterval)
+        probe.recorder.commitNow()
+        XCTAssertNil(self.hookLane(try XCTUnwrap(probe.store.archive(.t0))))
+
+        // And back on, through the same reader, to prove the switch is the only
+        // thing that stopped it.
+        probe.recorder.setRecording(true)
+        let resumed = HistoryClock.bucketIndex(probe.now, step: HistoryTier.t0.step)
+        reader.callback(HookPayload(value: 7))
+        XCTAssertEqual(HookPayload.log.keys.count, 1)
+        probe.advance(HistoryRecorder.commitInterval)
+        probe.recorder.commitNow()
+
+        let t0 = try XCTUnwrap(probe.store.archive(.t0))
+        let lane = try XCTUnwrap(self.hookLane(t0))
+        XCTAssertEqual(t0.slot(bucket: resumed, lane: lane)?.max, 7)
+    }
+
+    /// The other half of "costs a predicated branch": the call site builds its
+    /// `HistoryReaderKey` from `Reader.name`, which is `NSStringFromClass`
+    /// split and rebuilt on every access, so an eagerly evaluated argument
+    /// would cost that string on every tick of every reader with recording off.
+    /// `ingest` takes the key as an `@autoclosure` precisely so it does not.
+    func testTheReaderKeyIsNotBuiltWhileRecordingIsOff() throws {
+        let probe = try self.probe()
+        defer { probe.recorder.stop() }
+
+        var built = 0
+        probe.recorder.setRecording(false)
+        probe.recorder.waitUntilIdle()
+        probe.recorder.ingest(Probe.payload(42),
+                              reader: { built += 1; return Probe.reader }(), interval: 1)
+        XCTAssertEqual(built, 0)
+
+        probe.recorder.setRecording(true)
+        probe.recorder.ingest(Probe.payload(42),
+                              reader: { built += 1; return Probe.reader }(), interval: 1)
+        XCTAssertEqual(built, 1)
+    }
+
+    // MARK: - hook fixtures
+
+    /// Points the hook at this probe's recorder for the rest of the test, with
+    /// a clean log and a known interval.
+    private func hookedReader(_ probe: RecorderProbe, interval: Double) -> HookReader {
+        let previous = HistoryRecorder.hook
+        HistoryRecorder.hook = probe.recorder
+        self.addTeardownBlock { HistoryRecorder.hook = previous }
+
+        HookPayload.log.keys.removeAll()
+        let reader = hookReader
+        reader.interval = interval
+        return reader
+    }
+
+    /// Where the hook's own lane ended up. Not zero in general: the host app's
+    /// readers register lanes of their own in whatever order they tick.
+    private func hookLane(_ archive: HistoryArchive) -> Int? {
+        (0..<archive.laneCount).first { archive.entry(lane: $0)?.label == HookPayload.label }
+    }
+
     // MARK: - recorder fixtures
 
     /// A payload that behaves like a module's `HistoryProvider` conformance:
@@ -1998,3 +2137,48 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(HistoryRetentionPreset.standard.tiers, [.t0, .t1, .t2])
     }
 }
+
+// MARK: - Reader.callback hook fixtures
+//
+// At file scope, and not nested in the test case, because `Reader.name` is
+// `NSStringFromClass` split on "." — which demangles to "Module.Class" only for
+// a top-level class. A nested one reports `_TtCC5Tests12HistoryTests10HookReader`
+// and the identity the hook passes would be unreadable rather than wrong, which
+// is worse: it would still be a stable key and nothing would fail.
+
+/// A payload with a module conformance's shape on a type a `Reader` can carry —
+/// `Reader<T>` needs `Codable`, which the real payloads all are.
+struct HookPayload: Codable, HistoryProvider {
+    static let label = "hook lane"
+
+    /// What the hook handed the recorder. Written from the thread that drove
+    /// `Reader.callback` — the test's own, since `ingest` folds synchronously —
+    /// and read after that call returns. The app's own readers go through other
+    /// payload types, so they never reach this.
+    final class Log {
+        var keys: [HistoryReaderKey] = []
+    }
+    static let log = Log()
+
+    let value: Double
+
+    func emitHistory(reader: HistoryReaderKey, into sink: inout HistorySink) {
+        HookPayload.log.keys.append(reader)
+        let descriptor = HistoryLaneDescriptor(
+            key: HistoryLaneKey(module: .cpu, source: "hook", metric: "total"),
+            unit: .percent, kind: .gauge, label: HookPayload.label
+        )
+        guard let lane = sink.lane(for: descriptor) else { return }
+        sink.emit(lane: lane, value: self.value)
+    }
+}
+
+/// A real `Reader`, so that `callback` is the upstream one and not a copy of it
+/// that could drift. The class name is what the hook passes as the reader
+/// identity, so it is asserted rather than assumed.
+final class HookReader: Reader<HookPayload> {}
+
+/// Kept for the life of the test process on purpose: `Reader.deinit` writes its
+/// last value into the app's LevelDB, and a unit test has no business leaving a
+/// key behind in the user's own `~/Library/Application Support/Stats`.
+let hookReader = HookReader(.CPU)

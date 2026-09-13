@@ -116,6 +116,7 @@ open class Reader<T: Codable>: NSObject, ReaderInternal_p {
         if let value {
             self.callbackHandler(value)
             SystemStats.shared.send(key: moduleKey, value: value)
+            HistoryRecorder.hook.ingest(value, reader: HistoryReaderKey(module: self.module, name: self.name), interval: self.interval)
             if let ts = self.lastDBWrite, let interval = self.interval, Date().timeIntervalSince(ts) > interval * 10 {
                 DB.shared.insert(key: moduleKey, value: value, ts: self.history)
                 self.lastDBWrite = Date()
