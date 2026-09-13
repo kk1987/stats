@@ -41,7 +41,7 @@ class Notifications: NotificationsWrapper {
         if !self.unknownSensorsState {
             values = values.filter({ $0.group != .unknown })
         }
-        self.subviews.forEach({ $0.removeFromSuperview() })
+        self.resetSections()
         self.initIDs(values.map{$0.key})
         
         var types: [SensorType] = []

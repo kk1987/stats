@@ -143,6 +143,8 @@
 "Open application settings" = "Ouvrir les paramètres de l'application";
 "Open dashboard" = "Ouvrir le tableau de bord";
 "No notifications available in this module" = "Aucune notification disponible pour ce module";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Ouvrir le calendrier"; // translategemma:4b
 "Toggle the module" = "Basculer le module"; // gemma4:31b
 "Preview is unavailable while module is disabled." = "L'aperçu n'est pas disponible lorsque le module est désactivé.";
