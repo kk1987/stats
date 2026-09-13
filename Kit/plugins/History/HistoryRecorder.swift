@@ -28,6 +28,46 @@ import os
 public final class HistoryRecorder {
     public static let shared = HistoryRecorder()
 
+    /// The recorder `Reader.callback` feeds. In the app this is `shared` and
+    /// nothing ever assigns it; `AppDelegate` starts and flushes `shared`
+    /// directly.
+    ///
+    /// It exists because the hook in `Kit/module/reader.swift` has to name
+    /// something, and a singleton names the user's own history directory — so
+    /// without a seam here the one line that connects every reader in the app
+    /// to this object is the one line no test can execute without writing into
+    /// it. A test that drives a real `Reader` points this at a recorder on a
+    /// temporary directory and puts it back afterwards.
+    ///
+    /// Locked rather than a plain stored static, which is what the test it
+    /// exists for actually needs: the `Tests` bundle is hosted by the app, so
+    /// that test writes this while a dozen real readers are ticking through
+    /// `Reader.callback` and reading it. An unsynchronized reference swapped
+    /// under concurrent reads is a race whatever the pointer width, and the
+    /// cost of not having one — an uncontended `os_unfair_lock` on a path that
+    /// runs once per reader per second — does not show up anywhere.
+    public static var hook: HistoryRecorder {
+        get {
+            os_unfair_lock_lock(HistoryRecorder.hookLock)
+            let current = HistoryRecorder.hookStorage
+            os_unfair_lock_unlock(HistoryRecorder.hookLock)
+            // Outside the lock: `shared` builds a whole recorder, and a lazy
+            // global initializer is not somewhere to hold one.
+            return current ?? HistoryRecorder.shared
+        }
+        set {
+            os_unfair_lock_lock(HistoryRecorder.hookLock)
+            HistoryRecorder.hookStorage = newValue
+            os_unfair_lock_unlock(HistoryRecorder.hookLock)
+        }
+    }
+    private static var hookStorage: HistoryRecorder?
+    private static let hookLock: UnsafeMutablePointer<os_unfair_lock> = {
+        let lock = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
+        lock.initialize(to: os_unfair_lock())
+        return lock
+    }()
+
     // MARK: - cadences and thresholds (§3)
 
     /// One `DispatchSourceTimer` for the whole feature, 60 s with 5 s leeway.
@@ -441,7 +481,15 @@ public final class HistoryRecorder {
     /// `emitHistory` runs with `lock` held. That is what serializes the
     /// registry, and it is safe because the only thing a conformance may do is
     /// materialize its own payload array — never call back into the recorder.
-    public func ingest<T>(_ value: T, reader: HistoryReaderKey, interval: TimeInterval? = nil) {
+    ///
+    /// `reader` is an `@autoclosure` so that the master switch really does cost
+    /// a branch and nothing else. The call site has no key lying around to pass
+    /// — `Reader.name` is `NSStringFromClass(type(of: self))` split and rebuilt
+    /// on every access — and an eagerly evaluated argument would pay for that
+    /// string on every tick of every reader in the app with recording off,
+    /// which is exactly what §2 promises it does not do.
+    public func ingest<T>(_ value: T, reader: @autoclosure () -> HistoryReaderKey,
+                          interval: TimeInterval? = nil) {
         var stepped: (step: HistoryClockStep, at: TimeInterval)?
         var wake = false
         self.locked { () -> Void in
@@ -469,7 +517,7 @@ public final class HistoryRecorder {
             if case .backward = reading.step { self.table.resetForClockStep() }
 
             self.sink.prepare(registry: self, at: UInt64(now))
-            provider.emitHistory(reader: reader, into: &self.sink)
+            provider.emitHistory(reader: reader(), into: &self.sink)
             guard !self.sink.isEmpty else { return }
 
             self.table.fold(self.sink, at: now, interval: interval ?? 0)
