@@ -114,25 +114,6 @@ extension AppDelegate {
             NSApp.setActivationPolicy(dockIconStatus)
         }
         
-        self.checkIfShouldShowSupportWindow()
-        self.supportActivity.interval = 60 * 60 * 24 * 30
-        self.supportActivity.repeats = true
-        self.supportActivity.schedule { (completion: @escaping NSBackgroundActivityScheduler.CompletionHandler) in
-            DispatchQueue.main.async {
-                self.checkIfShouldShowSupportWindow()
-            }
-            completion(NSBackgroundActivityScheduler.Result.finished)
-        }
-        
-        self.supportRetryActivity.interval = 60 * 30
-        self.supportRetryActivity.repeats = true
-        self.supportRetryActivity.schedule { (completion: @escaping NSBackgroundActivityScheduler.CompletionHandler) in
-            DispatchQueue.main.async {
-                self.tryToShowSupportWindow()
-            }
-            completion(NSBackgroundActivityScheduler.Result.finished)
-        }
-        
         if let updateInterval = AppUpdateInterval(rawValue: Store.shared.string(key: "update-interval", defaultValue: AppUpdateInterval.silent.rawValue)) {
             self.updateActivity.invalidate()
             self.updateActivity.repeats = true
@@ -235,7 +216,21 @@ extension AppDelegate {
         }
     }
     
+    // Fork: the "Thanks for using Stats" window never opens on its own.
+    //
+    // Upstream shows it about a month after the first launch, at a moment the
+    // user does not control, so it lands in the middle of presentations and
+    // screen shares (exelban/stats#3423). The background activities that drove
+    // it are no longer scheduled, and every remaining trigger (the interaction
+    // hooks on popup and settings close, the remote authentication hook) ends
+    // up in one of the two functions below, so this flag keeps the window shut
+    // whichever path fires. The support view itself is untouched and stays
+    // reachable from the "Support the application" button in the settings.
+    private static let automaticSupportWindow: Bool = false
+
     public func checkIfShouldShowSupportWindow() {
+        guard AppDelegate.automaticSupportWindow else { return }
+
         if !Store.shared.exist(key: "setupProcess") && !Store.shared.exist(key: "runAtLoginInitialized") {
             return
         }
@@ -274,6 +269,7 @@ extension AppDelegate {
     }
     
     public func tryToShowSupportWindow(interaction: Bool = false) {
+        guard AppDelegate.automaticSupportWindow else { return }
         guard Store.shared.bool(key: "support_pending", defaultValue: false) else { return }
         
         if SystemStats.shared.auth.hasCredentials() {
