@@ -44,7 +44,8 @@ class Notifications: NotificationsWrapper {
     private var wifiInit: Bool = false
     
     public init(_ module: ModuleType) {
-        super.init(module, [self.connectionID, self.interfaceID, self.localID, self.publicID, self.wifiID])
+        // the network module notifies on state changes, not on a value crossing a threshold
+        super.init(module, [self.connectionID, self.interfaceID, self.localID, self.publicID, self.wifiID], withDuration: false)
         
         self.connectionState = Store.shared.bool(key: "\(self.module)_notifications_connection_state", defaultValue: self.connectionState)
         self.connectionThreshold = Store.shared.int(key: "\(self.module)_notifications_connection_threshold", defaultValue: self.connectionThreshold)
