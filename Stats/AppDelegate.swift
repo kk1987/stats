@@ -48,8 +48,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     internal var modulesMounted: Bool = false
     
     internal let updateActivity = NSBackgroundActivityScheduler(identifier: "eu.exelban.Stats.updateCheck")
-    internal let supportActivity = NSBackgroundActivityScheduler(identifier: "eu.exelban.Stats.support")
-    internal let supportRetryActivity = NSBackgroundActivityScheduler(identifier: "eu.exelban.Stats.supportRetry")
     
     internal var clickInNotification: Bool = false
     
