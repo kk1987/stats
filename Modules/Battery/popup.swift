@@ -14,10 +14,14 @@ import Kit
 
 internal class Popup: PopupWrapper {
     private let dashboardHeight: CGFloat = 160
+    private let chartHeight: CGFloat = 90 + Constants.Popup.separatorHeight
     
     private var dashboardBatteryView: BatteryView = BatteryView()
     private var dashboardBatteryStatus: BatteryStatus = BatteryStatus()
     private var levelField: NSTextField? = nil
+    
+    private var levelChart: LineChartView? = nil
+    private let levelChartHistory: Int = 180
     
     private var sourceField: NSTextField? = nil
     private var timeLabelField: NSTextField? = nil
@@ -63,6 +67,7 @@ internal class Popup: PopupWrapper {
         self.orientation = .vertical
         
         self.addArrangedSubview(self.initDashboard())
+        self.addArrangedSubview(self.initChart())
         self.addArrangedSubview(self.initDetails())
         self.addArrangedSubview(self.initBattery())
         self.addArrangedSubview(self.initProcesses())
@@ -72,6 +77,10 @@ internal class Popup: PopupWrapper {
     
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+    
+    public override func updateLayer() {
+        self.levelChart?.display()
     }
     
     public override func appear() {
@@ -145,6 +154,30 @@ internal class Popup: PopupWrapper {
         
         view.addArrangedSubview(self.dashboardBatteryView)
         view.addArrangedSubview(information)
+        
+        return view
+    }
+    
+    // Usage history for the battery level, drawn like every other module's
+    // live popup chart. The level is a fraction of 1, so the default `.none`
+    // scale already maps it onto a full 0...100 % axis, and the line takes the
+    // module's own level color so it reads as the gauge above it.
+    private func initChart() -> NSView {
+        let view: NSView = NSView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: self.chartHeight))
+        view.heightAnchor.constraint(equalToConstant: view.bounds.height).isActive = true
+        let separator = separatorView(localizedString("Usage history"), origin: NSPoint(x: 0, y: self.chartHeight-Constants.Popup.separatorHeight), width: self.frame.width)
+        let container: NSView = NSView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: separator.frame.origin.y))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.lightGray.withAlphaComponent(0.1).cgColor
+        container.layer?.cornerRadius = Constants.Popup.radius
+        
+        let chartFrame = NSRect(x: 1, y: 0, width: view.frame.width - 2, height: container.frame.height)
+        let chart = LineChartView(frame: chartFrame, num: self.levelChartHistory)
+        self.levelChart = chart
+        container.addSubview(chart)
+        
+        view.addSubview(separator)
+        view.addSubview(container)
         
         return view
     }
@@ -298,6 +331,10 @@ internal class Popup: PopupWrapper {
         
         self.levelField?.stringValue = "\(Int(abs(value.level) * 100))"
         self.levelField?.toolTip = "\(value.currentCapacity) mAh"
+    
+        let level = abs(value.level)
+        self.levelChart?.setColor(level.batteryColorV2())
+        self.levelChart?.addValue(level)
         
         self.sourceField?.stringValue = localizedString(value.powerSource)
         
