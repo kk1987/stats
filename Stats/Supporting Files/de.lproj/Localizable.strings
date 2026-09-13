@@ -143,6 +143,8 @@
 "Open application settings" = "App-Einstellungen öffnen";
 "Open dashboard" = "Dashboard öffnen";
 "No notifications available in this module" = "In diesem Modul sind keine Benachrichtigungen verfügbar";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Kalender öffnen";
 "Toggle the module" = "Modul umschalten";
 "Open System Stats" = "System Stats öffnen"; // gemma4:31b

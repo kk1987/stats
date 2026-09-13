@@ -143,6 +143,8 @@
 "Open application settings" = "Deschide setăriile aplicației";
 "Open dashboard" = "Deschide dashboard"; // gemma4:31b
 "No notifications available in this module" = "Nu sunt disponibile notificări în acest modul"; // gemma4:31b
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Deschide calendarul"; // translategemma:4b
 "Toggle the module" = "Comută modulul"; // gemma4:31b
 "Open System Stats" = "Deschide System Stats"; // gemma4:31b

@@ -143,6 +143,8 @@
 "Open application settings" = "Otvori postavke programa";
 "Open dashboard" = "Otvori preglednu ploču";
 "No notifications available in this module" = "Nema dostupnih obavijesti u ovom modulu"; // gemma4:31b
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Otvori kalendar"; // gemma4:31b
 "Toggle the module" = "Prebaci modul"; // gemma4:31b
 "Open System Stats" = "Otvori System Stats"; // gemma4:31b

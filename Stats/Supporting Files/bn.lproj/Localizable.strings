@@ -143,6 +143,8 @@
 "Open application settings" = "অ্যাপ সেটিংস খুলুন";
 "Open dashboard" = "ড্যাশবোর্ড খুলুন";
 "No notifications available in this module" = "এই মডিউলে কোনো বিজ্ঞপ্তি নেই";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "ক্যালেন্ডার খুলুন";
 "Toggle the module" = "মডিউল চালু/বন্ধ করুন";
 "Open System Stats" = "System Stats খুলুন";

@@ -143,6 +143,8 @@
 "Open application settings" = "Stats の設定を開く";
 "Open dashboard" = "ダッシュボードを開く";
 "No notifications available in this module" = "このモジュールには利用可能な通知がありません";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "カレンダーを開く";
 "Toggle the module" = "モジュールの切り替え";
 "Open System Stats" = "System Statsを開く"; // gemma4:31b

@@ -143,6 +143,8 @@
 "Open application settings" = "Apri le impostazioni dell'applicazione";
 "Open dashboard" = "Apri la dashboard";
 "No notifications available in this module" = "Notifiche non disponibili per questo modulo";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Apri Calendario";
 "Toggle the module" = "Commuta il modulo"; // gemma4:31b
 "Open System Stats" = "Apri System Stats"; // gemma4:31b

@@ -143,6 +143,8 @@
 "Open application settings" = "Åben applikationsindstillinger";
 "Open dashboard" = "Åben instrumentbræt";
 "No notifications available in this module" = "Ingen notifikationer tilgængelige i dette modul"; // gemma4:31b
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Åbn kalender"; // translategemma:4b
 "Toggle the module" = "Skift modulet"; // gemma4:31b
 "Open System Stats" = "Åbn System Stats"; // gemma4:31b

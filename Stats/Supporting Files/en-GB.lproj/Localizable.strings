@@ -143,6 +143,8 @@
 "Open application settings" = "Open application settings";
 "Open dashboard" = "Open dashboard";
 "No notifications available in this module" = "No notifications available in this module";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Open Calendar";
 "Toggle the module" = "Toggle the module";
 "Open System Stats" = "Open System Stats";

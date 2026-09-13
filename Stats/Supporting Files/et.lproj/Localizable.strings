@@ -143,6 +143,8 @@
 "Open application settings" = "Ava rakenduse seaded";
 "Open dashboard" = "Ava töölaud";
 "No notifications available in this module" = "Selles moodulis pole saadaval teavitusi.";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Ava kalender";
 "Toggle the module" = "Lülita moodul sisse";
 "Open System Stats" = "Ava System Stats"; // gemma4:31b

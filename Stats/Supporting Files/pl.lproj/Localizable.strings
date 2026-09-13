@@ -143,6 +143,8 @@
 "Open application settings" = "Otwórz ustawienia";
 "Open dashboard" = "Otwórz dashboard";
 "No notifications available in this module" = "W tym module nie są dostępne żadne powiadomienia";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Otwórz kalendarz";
 "Toggle the module" = "Przełącz moduł";
 "Open System Stats" = "Otworzyć System Stats";

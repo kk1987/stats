@@ -143,6 +143,8 @@
 "Open application settings" = "Mở cài đặt ứng dụng";
 "Open dashboard" = "Mở bảng điều khiển";
 "No notifications available in this module" = "Không có thông báo nào trong module này";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Mở Lịch";
 "Toggle the module" = "Bật/tắt module";
 "Open System Stats" = "Mở System Stats"; // gemma4:31b

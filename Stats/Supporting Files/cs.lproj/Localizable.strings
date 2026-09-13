@@ -143,6 +143,8 @@
 "Open application settings" = "Otevřít nastavení aplikace";
 "Open dashboard" = "Otevřít dashboard";
 "No notifications available in this module" = "V tomto modulu nejsou k dispozici žádná oznámení"; // gemma4:31b
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Otevřít kalendář"; // translategemma:4b
 "Toggle the module" = "Přepnout modul"; // gemma4:31b
 "Open System Stats" = "Otevřít System Stats"; // gemma4:31b

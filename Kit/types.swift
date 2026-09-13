@@ -352,6 +352,17 @@ public let notificationLevels: [KeyValue_t] = [
     KeyValue_t(key: "1.0", value: "100%")
 ]
 
+// how long a value has to stay past its threshold before the notification is sent, in seconds
+public let notificationDurations: [KeyValue_t] = [
+    KeyValue_t(key: "0", value: "None"),
+    KeyValue_t(key: "5", value: "5 sec"),
+    KeyValue_t(key: "10", value: "10 sec"),
+    KeyValue_t(key: "30", value: "30 sec"),
+    KeyValue_t(key: "60", value: "60 sec"),
+    KeyValue_t(key: "120", value: "2 minutes"),
+    KeyValue_t(key: "300", value: "5 minutes")
+]
+
 public struct Scale: KeyValue_p, Equatable {
     public let key: String
     public let value: String
