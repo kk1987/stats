@@ -806,6 +806,56 @@ public final class HistoryArchive {
         try self.persistHeader()
     }
 
+    /// Puts the anchor in the header without a write of its own.
+    ///
+    /// The anchor is only meaningful paired with the wall-clock time it was
+    /// taken at, and the only wall-clock time the header stores is
+    /// `lastCommitBucket` — so the pair has to be written by the same `commit`
+    /// that moves the cursor, not by a second `pwrite` beside it. Staging is
+    /// what lets the commit path stay at one 4 KiB write per cycle (§3).
+    public func stageMonotonicAnchor(_ value: UInt64) {
+        self.header.monotonicAnchor = value
+    }
+
+    // MARK: - reset (a clock step or a gap past the ring's own capacity)
+
+    /// Throws the tier's contents away and starts it again, keeping its lanes.
+    ///
+    /// §4 resets a tier rather than interleaving two eras — after a backward
+    /// clock step larger than the tier's window, or a gap at or beyond its
+    /// capacity — and is explicit that the reset must *not* iterate the ring:
+    /// backfilling a whole matrix would dirty multiple MiB in one burst at
+    /// exactly the worst moment for battery. So the file is recreated instead.
+    /// `ftruncate` gives a sparse, all-zero matrix for free, which is the same
+    /// state a first launch starts in, and the only bytes that actually reach
+    /// the disk are the header and the lane directory.
+    ///
+    /// The lanes survive with their identity, unit, kind and label — a reset
+    /// tier is still the same set of series — but `firstValidBucket` goes back
+    /// to `noValidBucket`, which is what makes every cell read as no-data until
+    /// the new era writes one of its own.
+    public func discardAll() throws {
+        guard self.fd >= 0 else { throw HistoryArchiveError.notOpen }
+        var carried = self.entries
+        for index in carried.indices {
+            carried[index].firstValidBucket = HistoryLaneEntry.noValidBucket
+            // The flag says the cells at this id belong to a displaced
+            // identity; after the reset no cell belongs to anyone. It is
+            // cleared here only in the tier's own copy — the registry still
+            // holds the flag, and `reconcile` carries the registry's flags
+            // forward — so it reappears until the registry retires it. That
+            // costs a lane staying greyed in the sidebar for a while and
+            // nothing in the data, which is why it is not worth a second
+            // path from here back into the registry.
+            carried[index].flags.remove(.reclaimed)
+        }
+
+        self.close()
+        try self.create()
+        guard !carried.isEmpty else { return }
+        try self.setDirectory(carried)
+    }
+
     // MARK: - read (mmap, bounds-checked slot access, stale-stamp rejection)
 
     /// One cell, or `nil` when there is nothing to show: lane out of range,
@@ -1211,6 +1261,19 @@ public final class HistoryStore {
 
     public var openTiers: [HistoryTier] {
         self.archives.keys.sorted { $0.rawValue < $1.rawValue }
+    }
+
+    /// Forgets a tier whose file did not survive an operation on it, closing
+    /// whatever is left of it.
+    ///
+    /// The alternative is worse than losing the tier: an archive that is closed
+    /// or has lost its lanes still answers `archive(_:)`, and every writer past
+    /// that point returns early on an empty lane count — silently, for the life
+    /// of the process. Handing back `nil` is the one thing every caller already
+    /// handles.
+    public func drop(_ tier: HistoryTier) {
+        guard let archive = self.archives.removeValue(forKey: tier) else { return }
+        archive.close()
     }
 
     public func closeAll() {
