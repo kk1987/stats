@@ -1089,8 +1089,449 @@ final class HistoryTests: XCTestCase {
 
     // MARK: - recorder
     //
-    // Coarse-tier catch-up after a simulated restart; gap-reason derivation at
-    // read; a TSAN run with Battery ingest on main.
+    // Coarse-tier catch-up after a simulated restart, including a gap longer
+    // than T0 retention; header rehydration across a launch; the three-strikes
+    // suspend and retry; the low-free-space skip; a TSAN run with ingest on
+    // main racing the commit thread. Gap-reason derivation at read arrives with
+    // the read path in release 2.
+
+    /// The ordinary cycle: a reader tick folds, the commit writes the T0
+    /// buckets that closed, and the coarse tiers are recomputed from those T0
+    /// rows rather than from anything held in memory (§3).
+    func testCommitWritesT0AndRollsTheCoarseTiersUpFromIt() throws {
+        let probe = try self.probe()
+        defer { probe.recorder.stop() }
+
+        // Four T0 buckets of one lane, two samples each: the rollup has
+        // something to take a min, a max and a count-weighted sum of.
+        let first = HistoryClock.bucketIndex(probe.now, step: HistoryTier.t0.step)
+        for step in 0..<4 {
+            probe.now = probe.start + TimeInterval(step * HistoryTier.t0.step)
+            probe.recorder.ingest(Probe.payload(1 + Double(step)), reader: Probe.reader, interval: 1)
+            probe.now += 1
+            probe.recorder.ingest(Probe.payload(10 + Double(step)), reader: Probe.reader, interval: 1)
+        }
+        probe.now = probe.start + HistoryRecorder.commitInterval
+        probe.recorder.commitNow()
+
+        let t0 = try XCTUnwrap(probe.store.archive(.t0))
+        XCTAssertEqual(probe.recorder.status, .recording)
+        XCTAssertEqual(probe.recorder.laneCount, 1)
+        XCTAssertEqual(t0.laneCount, 1)
+        for step in 0..<4 {
+            let slot = try XCTUnwrap(t0.slot(bucket: first + UInt32(step), lane: 0))
+            XCTAssertEqual(slot.count, 2)
+            XCTAssertEqual(slot.min, Float(1 + step))
+            XCTAssertEqual(slot.max, Float(10 + step))
+            XCTAssertEqual(slot.reason, .measured)
+        }
+
+        // The T1 bucket those four fall in has not closed yet, so nothing is
+        // written for it: a coarse row is produced at close and never before.
+        let t1 = try XCTUnwrap(probe.store.archive(.t1))
+        let openT1 = HistoryClock.bucketIndex(probe.start, step: HistoryTier.t1.step)
+        XCTAssertNil(t1.slot(bucket: openT1, lane: 0))
+
+        // One T1 step later it has, and it is the min of the mins, the max of
+        // the maxes and the sum of the sums.
+        probe.now = probe.start + TimeInterval(HistoryTier.t1.step)
+        probe.recorder.commitNow()
+        let rolled = try XCTUnwrap(t1.slot(bucket: openT1, lane: 0))
+        XCTAssertEqual(rolled.count, 8)
+        XCTAssertEqual(rolled.min, 1)
+        XCTAssertEqual(rolled.max, 13)
+        XCTAssertEqual(rolled.sum, (1 + 2 + 3 + 4) + (10 + 11 + 12 + 13))
+        XCTAssertEqual(rolled.reason, .measured)
+        XCTAssertEqual(t1.lastCommitBucket, openT1)
+    }
+
+    /// Stats quits on every update and every reboot, so without this the 30-day
+    /// and 1-year views would develop a hole at every restart (§3). The rule is
+    /// exactly "every coarse bucket newer than that tier's `lastCommitBucket`
+    /// and older than the current one", bounded by what T0 still retains:
+    /// downtime longer than 24 h leaves honest no-data, not a fabricated line.
+    func testCoarseTiersCatchUpAtOpenAcrossAGapLongerThanT0Retention() throws {
+        let directory = self.folder.appendingPathComponent("history")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        // Aligned to a T2 boundary so every bucket index below is exact.
+        let step = TimeInterval(HistoryTier.t2.step)
+        let now = (1_760_000_000 / step).rounded(.down) * step
+        let currentT0 = HistoryClock.bucketIndex(now, step: HistoryTier.t0.step)
+        let currentT1 = HistoryClock.bucketIndex(now, step: HistoryTier.t1.step)
+        let currentT2 = HistoryClock.bucketIndex(now, step: HistoryTier.t2.step)
+
+        // Two hours of T0 immediately before the relaunch — the part of the
+        // downtime the archive can still account for.
+        let seeded: UInt32 = 2 * 3_600 / UInt32(HistoryTier.t0.step)
+        let t0 = HistoryArchive(tier: .t0, url: directory.appendingPathComponent(HistoryTier.t0.fileName))
+        try t0.open()
+        try t0.setDirectory(Self.entries(2))
+        try t0.commit(((currentT0 - seeded)..<currentT0).map {
+            Self.row($0, lanes: 2, base: Float($0 % 5))
+        })
+        t0.close()
+
+        // T1 last wrote 26 hours ago: everything between that and the start of
+        // what T0 retains is unrecoverable.
+        let stale = HistoryClock.bucketIndex(now - 26 * 3_600, step: HistoryTier.t1.step)
+        let t1 = HistoryArchive(tier: .t1, url: directory.appendingPathComponent(HistoryTier.t1.fileName))
+        try t1.open()
+        try t1.setDirectory(Self.entries(2))
+        try t1.commit([Self.row(stale, lanes: 2, base: 99)])
+        t1.close()
+
+        let probe = try self.probe(directory: directory, now: now)
+        defer { probe.recorder.stop() }
+
+        let reopenedT1 = try XCTUnwrap(probe.store.archive(.t1))
+        XCTAssertEqual(reopenedT1.lastCommitBucket, currentT1 - 1)
+
+        // The last closed T1 bucket, rolled up out of the twelve T0 rows it
+        // spans. Recomputed here the way the seed was written.
+        let last = currentT1 - 1
+        let fine = (last * 12)..<((last + 1) * 12)
+        let values = fine.map { Float($0 % 5) }
+        let rolled = try XCTUnwrap(reopenedT1.slot(bucket: last, lane: 0))
+        XCTAssertEqual(rolled.count, 12)
+        XCTAssertEqual(rolled.min, values.min())
+        XCTAssertEqual(rolled.max, values.max())
+        XCTAssertEqual(rolled.sum, values.reduce(0, +))
+
+        // The gap: T0 never held these buckets, so the catch-up writes nothing
+        // for them and they read as no-data rather than as zeroes.
+        XCTAssertNil(reopenedT1.slot(bucket: stale + 1, lane: 0))
+        XCTAssertNil(reopenedT1.slot(bucket: currentT1 - 720, lane: 0))
+        XCTAssertNil(reopenedT1.slot(bucket: currentT1 - (seeded / 12) - 1, lane: 0))
+        // The still-open bucket is not written either.
+        XCTAssertNil(reopenedT1.slot(bucket: currentT1, lane: 0))
+        // And what the tier already held is untouched by the catch-up.
+        XCTAssertEqual(reopenedT1.slot(bucket: stale, lane: 1)?.max, 100)
+
+        // T2 catches up the same way, out of the same T0 rows.
+        let t2 = try XCTUnwrap(probe.store.archive(.t2))
+        let rolledT2 = try XCTUnwrap(t2.slot(bucket: currentT2 - 1, lane: 0))
+        XCTAssertEqual(rolledT2.count, UInt16(HistoryTier.t2.step / HistoryTier.t0.step))
+        XCTAssertEqual(t2.lastCommitBucket, currentT2 - 1)
+    }
+
+    /// `lastCommitBucket` is what the catch-up above starts from and
+    /// `monotonicAnchor` is what §4's clock-step check compares against, so both
+    /// have to survive a quit. The anchor is written here through the archive
+    /// because the commit that gives the clock a writer is the next one; what is
+    /// under test is that a recorder launch — open, reconcile, catch up, commit
+    /// — carries them through rather than resetting them.
+    func testTheHeaderRehydratesAcrossARecorderLaunch() throws {
+        let directory = self.folder.appendingPathComponent("history")
+        let first = try self.probe(directory: directory)
+
+        first.now = first.start
+        first.recorder.ingest(Probe.payload(42), reader: Probe.reader, interval: 1)
+        first.now = first.start + HistoryRecorder.commitInterval
+        first.recorder.commitNow()
+
+        let written = try XCTUnwrap(first.store.archive(.t0))
+        let lastCommitBucket = written.lastCommitBucket
+        let createdTs = written.createdTs
+        XCTAssertEqual(lastCommitBucket, HistoryClock.bucketIndex(first.start, step: HistoryTier.t0.step))
+        try written.setMonotonicAnchor(987_654_321)
+        first.recorder.stop()
+
+        let second = try self.probe(directory: directory, now: first.start + 2 * HistoryRecorder.commitInterval)
+        defer { second.recorder.stop() }
+
+        let reopened = try XCTUnwrap(second.store.archive(.t0))
+        XCTAssertEqual(reopened.lastCommitBucket, lastCommitBucket)
+        XCTAssertEqual(reopened.monotonicAnchor, 987_654_321)
+        XCTAssertEqual(reopened.createdTs, createdTs)
+        // Lane ids are positions in the stored directory, so a launch that
+        // rebuilt the registry from scratch would re-point the matrix.
+        XCTAssertEqual(second.recorder.laneCount, 1)
+        XCTAssertEqual(reopened.directory[0].label, Probe.label)
+        XCTAssertEqual(reopened.slot(bucket: lastCommitBucket, lane: 0)?.max, 42)
+    }
+
+    /// Three consecutive write failures suspend recording for an hour, surface
+    /// the banner, and retry on the next cycle rather than waiting for a
+    /// relaunch (§3).
+    func testThreeWriteFailuresSuspendRecordingAndTheNextCycleRetries() throws {
+        let probe = try self.probe()
+        defer { probe.recorder.stop() }
+
+        // One clean cycle first: the failure under test is a failing commit on
+        // an archive that is already set up, not a failing registration.
+        probe.ingest(1)
+        XCTAssertEqual(probe.recorder.status, .recording)
+
+        var attempts = 0
+        HistoryArchive.writeObserver = { _, _ in
+            attempts += 1
+            throw HistoryArchiveError.io(ENOSPC)
+        }
+        defer { HistoryArchive.writeObserver = nil }
+        for strike in 1...HistoryRecorder.failureStrikes {
+            probe.ingest(Double(strike))
+            XCTAssertGreaterThan(attempts, 0)
+        }
+        XCTAssertEqual(probe.recorder.status, .writeFailures)
+
+        // Suspended: the cycles inside the hour do not even reach the file.
+        let suspendedAt = attempts
+        probe.ingest(9)
+        probe.ingest(9)
+        XCTAssertEqual(attempts, suspendedAt)
+        XCTAssertEqual(probe.recorder.status, .writeFailures)
+
+        // An hour later the volume has room again and the recorder retries on
+        // its own.
+        HistoryArchive.writeObserver = nil
+        probe.now += HistoryRecorder.suspensionWindow
+        let recovered = probe.now
+        probe.ingest(7)
+        XCTAssertEqual(probe.recorder.status, .recording)
+
+        let t0 = try XCTUnwrap(probe.store.archive(.t0))
+        let bucket = HistoryClock.bucketIndex(recovered, step: HistoryTier.t0.step)
+        XCTAssertEqual(t0.slot(bucket: bucket, lane: 0)?.max, 7)
+    }
+
+    /// Below 50 MB free the commit is skipped and the settings row says so: the
+    /// store degrades before the volume does (§3). Skipped is not lost — the
+    /// accumulators keep folding and the next commit with room writes them.
+    func testALowFreeSpaceVolumeSkipsTheCommitAndSaysSo() throws {
+        let probe = try self.probe()
+        defer { probe.recorder.stop() }
+
+        probe.freeSpace = HistoryStore.freeSpaceFloor - 1
+        let first = probe.now
+
+        var writes = 0
+        HistoryArchive.writeObserver = { _, _ in writes += 1 }
+        defer { HistoryArchive.writeObserver = nil }
+        probe.ingest(3)
+        HistoryArchive.writeObserver = nil
+
+        XCTAssertEqual(writes, 0)
+        XCTAssertEqual(probe.recorder.status, .lowDiskSpace)
+        XCTAssertEqual(probe.store.archive(.t0)?.laneCount, 0)
+
+        // Room again: the same commit path writes, including the bucket the
+        // skipped cycle was holding.
+        probe.freeSpace = HistoryStore.freeSpaceFloor
+        probe.ingest(4)
+        XCTAssertEqual(probe.recorder.status, .recording)
+
+        let t0 = try XCTUnwrap(probe.store.archive(.t0))
+        XCTAssertEqual(t0.slot(bucket: HistoryClock.bucketIndex(first, step: HistoryTier.t0.step), lane: 0)?.max, 3)
+        XCTAssertEqual(t0.laneCount, 1)
+    }
+
+    /// Minimal is "the live window and nothing retained", not a different
+    /// retention policy to reason about: T0 only, and the rollup simply has no
+    /// coarse tier to write (§3).
+    func testTheMinimalPresetKeepsT0Alone() throws {
+        let probe = try self.probe(preset: .minimal)
+        defer { probe.recorder.stop() }
+
+        probe.ingest(5)
+        XCTAssertNotNil(probe.store.archive(.t0))
+        XCTAssertNil(probe.store.archive(.t1))
+        XCTAssertNil(probe.store.archive(.t2))
+        XCTAssertEqual(probe.store.openTiers, [.t0])
+
+        let contents = try FileManager.default.contentsOfDirectory(atPath: probe.store.directory.path)
+        XCTAssertTrue(contents.contains(HistoryTier.t0.fileName))
+        XCTAssertFalse(contents.contains(HistoryTier.t1.fileName))
+        XCTAssertFalse(contents.contains(HistoryTier.t2.fileName))
+    }
+
+    /// A stop/start cycle has to leave a recorder that still commits on its own.
+    ///
+    /// The timer is wanted by the ingest that dirties a clean table and given up
+    /// by the commit that leaves it clean, so a `stop` that parks the timer
+    /// while the open bucket still holds samples has to give the intent up too.
+    /// Without that the recorder comes back from the next `start` with a
+    /// suspended timer nothing will ever resume, and the loss is silent: the
+    /// accumulators keep folding and the staging ring drops everything older
+    /// than its 160 s.
+    func testStopAndStartLeavesTheCommitTimerAlive() throws {
+        let probe = try self.probe()
+        defer { probe.recorder.stop() }
+
+        probe.recorder.ingest(Probe.payload(1), reader: Probe.reader, interval: 1)
+        XCTAssertTrue(probe.recorder.isCommitTimerRunning)
+
+        // Stopped mid-bucket, which is the ordinary case: what was folded a
+        // moment ago is still open and the table is anything but clean.
+        probe.now += 1
+        probe.recorder.ingest(Probe.payload(2), reader: Probe.reader, interval: 1)
+        probe.recorder.stop()
+        XCTAssertFalse(probe.recorder.isCommitTimerRunning)
+        XCTAssertEqual(probe.recorder.status, .disabled)
+
+        probe.now += TimeInterval(HistoryTier.t0.step)
+        probe.recorder.start()
+        probe.recorder.waitUntilIdle()
+        XCTAssertEqual(probe.recorder.status, .recording)
+        XCTAssertFalse(probe.recorder.isCommitTimerRunning)
+
+        // The ingest after the restart is the one that has to arrange a commit.
+        probe.recorder.ingest(Probe.payload(3), reader: Probe.reader, interval: 1)
+        XCTAssertTrue(probe.recorder.isCommitTimerRunning)
+
+        // And the commit it arranged writes: the bucket this sample landed in
+        // is on disk one cadence later, without anyone calling `flush`.
+        let bucket = HistoryClock.bucketIndex(probe.now, step: HistoryTier.t0.step)
+        probe.now += HistoryRecorder.commitInterval
+        probe.recorder.commitNow()
+        let t0 = try XCTUnwrap(probe.store.archive(.t0))
+        let slot = try XCTUnwrap(t0.slot(bucket: bucket, lane: 0))
+        XCTAssertEqual(slot.count, 1)
+        XCTAssertEqual(slot.max, 3)
+        XCTAssertEqual(probe.recorder.laneCount, 1)
+    }
+
+    /// §2's whole concurrency story in one test: ingest on the main run loop —
+    /// where Battery's IOPS notification lands — and on a second reader queue,
+    /// racing the commit thread that snapshots and resets the same accumulators.
+    ///
+    /// Run it under Thread Sanitizer with
+    ///
+    ///     xcodebuild -project Stats.xcodeproj -scheme Stats \
+    ///       -derivedDataPath <dd> test -enableThreadSanitizer YES \
+    ///       -only-testing:Tests/HistoryTests/testIngestOnTwoQueuesRacesTheCommitThread \
+    ///       CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
+    ///
+    /// The shared scheme deliberately does not turn TSAN on: it is an upstream
+    /// file this fork tries not to touch (§9), and a sanitized run of the whole
+    /// suite costs about ten times the wall clock for one test's benefit.
+    ///
+    /// The clock here is the real one. A test-driven clock would be mutable
+    /// state shared between these threads, and the race the sanitizer found
+    /// would be the harness's own.
+    func testIngestOnTwoQueuesRacesTheCommitThread() throws {
+        let directory = self.folder.appendingPathComponent("history")
+        let store = HistoryStore(directory: directory)
+        let recorder = HistoryRecorder(store: store, preset: .standard, environment: HistoryRecorder.Environment(
+            now: { Date().timeIntervalSince1970 },
+            availableSpace: { _ in Int64.max },
+            isPowerConstrained: { false }
+        ))
+        recorder.start()
+        recorder.waitUntilIdle()
+        defer { recorder.stop() }
+
+        let ticks = 2_000
+        let finished = self.expectation(description: "ingest and commit finished")
+        finished.expectedFulfillmentCount = 2
+
+        DispatchQueue(label: "history-tests.reader").async {
+            for i in 0..<ticks {
+                recorder.ingest(Probe.payload(Double(i % 97), source: "reader"),
+                                reader: Probe.reader, interval: 1)
+            }
+            finished.fulfill()
+        }
+        DispatchQueue(label: "history-tests.commit").async {
+            for _ in 0..<(ticks / 10) {
+                recorder.commitNow()
+            }
+            finished.fulfill()
+        }
+        // The test method itself runs on main, which is where Battery ingests.
+        for i in 0..<ticks {
+            recorder.ingest(Probe.payload(Double(i % 89), source: "battery"),
+                            reader: Probe.reader, interval: 1)
+        }
+
+        self.wait(for: [finished], timeout: 120)
+        recorder.commitNow()
+        XCTAssertEqual(recorder.laneCount, 2)
+        XCTAssertEqual(recorder.status, .recording)
+    }
+
+    // MARK: - recorder fixtures
+
+    /// A payload that behaves like a module's `HistoryProvider` conformance:
+    /// one lane resolved through the registry per tick, then one scalar.
+    private struct Probe: HistoryProvider {
+        static let label = "probe lane"
+        static let reader = HistoryReaderKey(module: .CPU, name: "probe")
+
+        let source: String
+        let value: Double
+
+        static func payload(_ value: Double, source: String = "") -> Probe {
+            Probe(source: source, value: value)
+        }
+
+        func emitHistory(reader: HistoryReaderKey, into sink: inout HistorySink) {
+            let descriptor = HistoryLaneDescriptor(
+                key: HistoryLaneKey(module: .cpu, source: self.source, metric: "total"),
+                unit: .percent, kind: .gauge, label: Probe.label
+            )
+            guard let lane = sink.lane(for: descriptor) else { return }
+            sink.emit(lane: lane, value: self.value)
+        }
+    }
+
+    /// A whole recorder pointed at a temporary directory, with a clock, a free
+    /// space figure and a power state the test drives.
+    private final class RecorderProbe {
+        let store: HistoryStore
+        let recorder: HistoryRecorder
+        /// The wall clock the recorder reads. Mutated only from the test thread.
+        var now: TimeInterval
+        var freeSpace: Int64?
+        var isPowerConstrained = false
+        let start: TimeInterval
+
+        init(directory: URL, preset: HistoryRetentionPreset, now: TimeInterval) {
+            self.now = now
+            self.start = now
+            self.freeSpace = HistoryStore.freeSpaceFloor * 100
+            self.store = HistoryStore(directory: directory)
+
+            // Boxed so the closures below do not capture a half-built `self`.
+            let box = Box()
+            self.recorder = HistoryRecorder(store: self.store, preset: preset,
+                                            environment: HistoryRecorder.Environment(
+                now: { box.probe?.now ?? now },
+                availableSpace: { _ in box.probe?.freeSpace },
+                isPowerConstrained: { box.probe?.isPowerConstrained ?? false }
+            ))
+            box.probe = self
+        }
+
+        /// One reader tick followed by the commit cycle that closes its bucket,
+        /// which is the shape every recorder test needs: a bucket the commit
+        /// thread has not seen close yet is still open and writes nothing.
+        func ingest(_ value: Double) {
+            self.recorder.ingest(Probe.payload(value), reader: Probe.reader, interval: 1)
+            self.now += HistoryRecorder.commitInterval
+            self.recorder.commitNow()
+        }
+
+        /// Weak-by-construction indirection: the recorder outlives the closures'
+        /// need for the probe only inside this class's own lifetime.
+        final class Box {
+            weak var probe: RecorderProbe?
+        }
+    }
+
+    /// A started recorder on a fresh directory. The clock starts five seconds
+    /// into a bucket so that a one-second interval's span attribution stays
+    /// inside it and the assertions can name single buckets.
+    private func probe(directory: URL? = nil, preset: HistoryRetentionPreset = .standard,
+                      now: TimeInterval? = nil) throws -> RecorderProbe {
+        let directory = directory ?? self.folder.appendingPathComponent("history")
+        let aligned = (1_760_000_000 / TimeInterval(HistoryTier.t2.step)).rounded(.down)
+            * TimeInterval(HistoryTier.t2.step) + 5
+        let probe = RecorderProbe(directory: directory, preset: preset, now: now ?? aligned)
+        probe.recorder.start()
+        probe.recorder.waitUntilIdle()
+        return probe
+    }
 
     // MARK: - layout
     //
