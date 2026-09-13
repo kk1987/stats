@@ -1053,14 +1053,18 @@ public final class HistoryLock {
 
 // MARK: - store
 
-/// Owns the tier archives, the cross-process lock and the recording status that
-/// the settings section renders.
+/// Owns the tier archives and the cross-process lock, and names the states the
+/// settings section renders. The live status value belongs to the recorder,
+/// which is the only thing that knows which of them is current.
+///
+/// Not thread safe: the recorder touches it only from the history queue.
 public final class HistoryStore {
     public static let shared = HistoryStore()
 
     /// Recording is not possible, or is suspended, for one of these reasons.
-    public enum Status {
+    public enum Status: Equatable {
         case recording
+        /// The master switch is off. Zero ingest and zero writes (§6).
         case disabled
         case lowDiskSpace
         case writeFailures
@@ -1074,8 +1078,16 @@ public final class HistoryStore {
     public static let freeSpaceFloor: Int64 = 50 * 1_000 * 1_000
 
     private var lock: HistoryLock?
+    private var archives: [HistoryTier: HistoryArchive] = [:]
 
-    private init() {}
+    /// Where this store's files live. An instance property rather than only the
+    /// static below so that a test — or a second store, if one is ever needed —
+    /// can be pointed at a directory of its own.
+    public let directory: URL
+
+    public init(directory: URL = HistoryStore.directoryURL) {
+        self.directory = directory
+    }
 
     // MARK: - location (~/Library/Application Support/Stats/history, no backup)
 
@@ -1131,8 +1143,9 @@ public final class HistoryStore {
     /// and an unopenable lock file there would otherwise be reported as a second
     /// copy of Stats recording.
     @discardableResult
-    public func acquireLock(in directory: URL = HistoryStore.directoryURL) -> HistoryLockOutcome {
+    public func acquireLock(in directory: URL? = nil) -> HistoryLockOutcome {
         if let lock = self.lock, lock.isHeld { return .acquired }
+        let directory = directory ?? self.directory
         guard (try? HistoryStore.prepareDirectory(directory)) != nil else { return .unavailable(0) }
 
         let lock = HistoryLock(url: directory.appendingPathComponent(".lock"))
@@ -1163,7 +1176,82 @@ public final class HistoryStore {
         return Int64(capacity)
     }
 
-    // MARK: - open and catch-up
+    // MARK: - open
+
+    /// Opens one archive per tier the preset asks for, and drops any file the
+    /// preset no longer covers from the open set.
+    ///
+    /// Damage is not an error here — `open()` quarantines and recreates, and the
+    /// outcome says which tier that happened to — so this throws only when a
+    /// file could not be examined at all (§3).
+    @discardableResult
+    public func open(preset: HistoryRetentionPreset) throws -> [HistoryTier: HistoryArchiveOpenOutcome] {
+        try HistoryStore.prepareDirectory(self.directory)
+
+        var opened: [HistoryTier: HistoryArchive] = [:]
+        var outcomes: [HistoryTier: HistoryArchiveOpenOutcome] = [:]
+        for tier in preset.tiers {
+            let archive = self.archives[tier]
+                ?? HistoryArchive(tier: tier, url: self.directory.appendingPathComponent(tier.fileName))
+            outcomes[tier] = try archive.open()
+            opened[tier] = archive
+        }
+        for (tier, archive) in self.archives where opened[tier] == nil {
+            archive.close()
+        }
+        self.archives = opened
+
+        try self.reconcileDirectories()
+        return outcomes
+    }
+
+    public func archive(_ tier: HistoryTier) -> HistoryArchive? {
+        self.archives[tier]
+    }
+
+    public var openTiers: [HistoryTier] {
+        self.archives.keys.sorted { $0.rawValue < $1.rawValue }
+    }
+
+    public func closeAll() {
+        for archive in self.archives.values {
+            archive.close()
+        }
+        self.archives.removeAll()
+    }
+
+    public func sync() {
+        for archive in self.archives.values {
+            archive.sync()
+        }
+    }
+
+    /// The directory is written into all three files whenever a lane is added,
+    /// and a crash between those writes leaves them disagreeing. §3 settles it
+    /// by fiat: **T0's copy wins** and the others are rewritten from it, keeping
+    /// only their own `firstValidBucket` — a lane present in T0 but absent in T2
+    /// simply has no T2 data yet, which `firstValidBucket` already expresses.
+    private func reconcileDirectories() throws {
+        guard let t0 = self.archives[.t0] else { return }
+        let primary = t0.directory
+
+        for tier in self.openTiers where tier != .t0 {
+            guard let archive = self.archives[tier] else { continue }
+            if primary.count < archive.laneCount {
+                // T0 was quarantined and recreated, so the lane ids in this
+                // tier's matrix no longer describe anything T0 can name. The
+                // file cannot shrink in place and its contents are unreadable
+                // either way, so it starts again.
+                error("history: \(tier.fileName) has lanes T0 does not, recreating it")
+                archive.close()
+                try? FileManager.default.removeItem(at: archive.url)
+                _ = try archive.open()
+            }
+            guard !primary.isEmpty else { continue }
+            try archive.setDirectory(HistoryLaneDirectory.reconcile(primary: primary, with: archive.directory))
+        }
+    }
+
     // MARK: - status and size readout (lane count, bytes on disk)
     // MARK: - deleteAll (quiesce, munmap, unlink, recreate)
 }
