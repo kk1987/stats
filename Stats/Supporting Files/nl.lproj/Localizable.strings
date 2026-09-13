@@ -143,6 +143,8 @@
 "Open application settings" = "Open de applicatie-instellingen";
 "Open dashboard" = "Dashboard openen"; // translategemma:4b
 "No notifications available in this module" = "Geen meldingen beschikbaar in deze module";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Open kalender";
 "Toggle the module" = "Activeer/deactiveer de module";
 "Open System Stats" = "Open System Stats";

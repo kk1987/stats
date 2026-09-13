@@ -143,6 +143,8 @@
 "Open application settings" = "打开应用设置";
 "Open dashboard" = "打开仪表盘";
 "No notifications available in this module" = "该模块不支持通知";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "打开日历";
 "Toggle the module" = "切换模块显示";
 "Open System Stats" = "打开 System Stats"; // gemma4:31b

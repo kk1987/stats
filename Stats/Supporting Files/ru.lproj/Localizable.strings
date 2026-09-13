@@ -143,6 +143,8 @@
 "Open application settings" = "Открыть настройки приложения";
 "Open dashboard" = "Открыть dashboard";
 "No notifications available in this module" = "В этом модуле нет доступных уведомлений";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Открыть календарь";
 "Toggle the module" = "Переключить модуль";
 "Open System Stats" = "Открыть System Stats";

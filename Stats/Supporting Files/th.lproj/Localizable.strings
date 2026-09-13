@@ -143,6 +143,8 @@
 "Open application settings" = "เปิดการตั้งค่าแอปพลิเคชัน";
 "Open dashboard" = "เปิดแดชบอร์ด";
 "No notifications available in this module" = "ไม่มีการแจ้งเตือนที่พร้อมใช้งานในโมดูลนี้"; // gemma4:31b
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "เปิดปฏิทิน"; // translategemma:4b
 "Toggle the module" = "สลับโมดูล"; // gemma4:31b
 "Open System Stats" = "เปิด System Stats"; // gemma4:31b

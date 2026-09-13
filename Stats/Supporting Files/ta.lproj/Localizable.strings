@@ -143,6 +143,8 @@
 "Open application settings" = "பயன்பாட்டு அமைப்புகளைத் திற";
 "Open dashboard" = "முகப்பு பலகையைத் திற";
 "No notifications available in this module" = "இந்த தொகுதியில் அறிவிப்புகள் எதுவும் இல்லை";
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "நாட்காட்டியைத் திற";
 "Toggle the module" = "தொகுதியை மாற்று";
 "Open System Stats" = "System Stats-ஐத் திற";

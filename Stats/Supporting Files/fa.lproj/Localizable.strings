@@ -143,6 +143,8 @@
 "Open application settings" = "بستن تنظیمات اپلیکیشن";
 "Open dashboard" = "باز کردن داشبورد";
 "No notifications available in this module" = "در این ماژول هیچ اعلانی موجود نیست"; // gemma4:31b
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "باز کردن تقویم"; // translategemma:4b
 "Toggle the module" = "تغییر وضعیت ماژول"; // gemma4:31b
 "Open System Stats" = "باز کردن System Stats"; // gemma4:31b

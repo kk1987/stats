@@ -143,6 +143,8 @@
 "Open application settings" = "Отваряне на настройките на приложението";
 "Open dashboard" = "Отваряне на таблото";
 "No notifications available in this module" = "В този модул няма налични известия"; // gemma4:31b
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Отвори календара"; // translategemma:4b
 "Toggle the module" = "Превключи модула"; // gemma4:31b
 "Open System Stats" = "Отвори System Stats"; // gemma4:31b

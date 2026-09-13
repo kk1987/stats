@@ -143,6 +143,8 @@
 "Open application settings" = "Buka pengaturan aplikasi";
 "Open dashboard" = "Buka dasbor";
 "No notifications available in this module" = "Tidak ada notifikasi yang tersedia di modul ini"; // gemma4:31b
+"Minimum duration" = "Minimum duration";
+"How long the value must stay past the threshold" = "How long the value must stay past the threshold";
 "Open Calendar" = "Buka Kalender"; // translategemma:4b
 "Toggle the module" = "Alihkan modul"; // gemma4:31b
 "Open System Stats" = "Buka System Stats"; // gemma4:31b
