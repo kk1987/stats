@@ -22,6 +22,25 @@ public struct HistoryClock {
     public init() {}
 
     // MARK: - bucketIndex(ts:step:)
+
+    /// `floor(epoch / step)`. Wall-clock aligned and shared by every reader, so
+    /// a 1 s and a 60 s reader land on the same grid and a runtime `setInterval`
+    /// is a non-event (§2). Negative timestamps — a clock set before 1970, or an
+    /// interval subtracted off a fresh boot clock — floor to bucket 0 rather
+    /// than wrapping a `UInt32` around.
+    public static func bucketIndex(_ ts: TimeInterval, step: Int) -> UInt32 {
+        guard ts > 0, step > 0 else { return 0 }
+        let index = (ts / Double(step)).rounded(.down)
+        guard index.isFinite, index > 0 else { return 0 }
+        return index >= Double(UInt32.max) ? UInt32.max : UInt32(index)
+    }
+
+    /// The wall-clock second a bucket starts at: the inverse of `bucketIndex`,
+    /// and what the step-lane hold compares against `holdUntil` (§2).
+    public static func bucketStart(_ bucket: UInt32, step: Int) -> TimeInterval {
+        TimeInterval(bucket) * TimeInterval(step)
+    }
+
     // MARK: - monotonic anchor and divergence check
     // MARK: - forward step (ring advances, skipped slots read as no-data)
     // MARK: - backward step (never overwrite a pre-step stamp; reset past a tier window)

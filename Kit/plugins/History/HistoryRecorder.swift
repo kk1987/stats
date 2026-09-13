@@ -13,6 +13,13 @@ import Foundation
 /// `Reader.callback`, on whatever queue that reader runs on — including the
 /// main run loop for Battery's IOPS notification — so it must stay allocation
 /// free and must return immediately when recording is off.
+///
+/// Two things the recorder owes the pieces below it, because neither can
+/// enforce them itself: its `HistoryLaneRegistry` conformance has to serialize
+/// `HistoryLaneDirectory.register` — that object is not thread safe and every
+/// reader queue reaches it through `HistorySink.lane` — and it has to write the
+/// directory out when `lastUsedTs` drifts far enough from the stored copy that
+/// LRU reclaim would read a hot lane as cold at the next launch.
 public final class HistoryRecorder {
     public static let shared = HistoryRecorder()
 
