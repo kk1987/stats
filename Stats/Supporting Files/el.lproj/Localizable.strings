@@ -516,3 +516,17 @@
 "Pink" = "Ροζ";
 "Teal" = "Γαλαζοπράσινο";
 "Indigo" = "Βαθύ μπλε";
+"Stored history" = "Stored history";
+"Record usage history" = "Record usage history";
+"Size on disk" = "Size on disk";
+"%0 lanes · %1" = "%0 lanes · %1";
+"Reveal in Finder" = "Reveal in Finder";
+"Delete history" = "Delete history";
+"Delete" = "Delete";
+"Delete history text" = "All recorded usage history will be permanently deleted. Are you sure you want to do this?";
+"History paused — low disk space" = "History paused — low disk space";
+"History suspended — write errors" = "History suspended — write errors";
+"History is being recorded by another copy of Stats" = "History is being recorded by another copy of Stats";
+"Recorded usage history will also be deleted." = "Recorded usage history will also be deleted.";
+"%0 lane · %1" = "%0 lane · %1";
+"History could not be deleted" = "History could not be deleted";
