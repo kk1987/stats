@@ -250,9 +250,10 @@ Stored: numeric series plus identifiers — SMC keys, GPU ids and models, volume
 | `Stats/helpers.swift` | ⌃⌥H branch in `handleKeyEvent` (`:361-380`) | ~6 lines |
 | `Modules/{CPU,RAM,GPU,Net,Sensors}/popup.swift` | `button:` argument on the existing "Usage history" separator call | 1 line each |
 | `Modules/Battery/popup.swift` | new History section + `LineChartView` | ~45 lines |
+| `Stats/Supporting Files/*.lproj/Localizable.strings` | ~40 new keys, appended at EOF in all 41 files via `Kit/scripts/i18n.py fix` | ~40 lines × 41 |
 | `Stats.xcodeproj/project.pbxproj` | 17 new files × 4 entries, **all in commit 1** | ~68 mechanical |
 
-~155 lines across 12 upstream files, every one a single hunk. Everything else is new files: 9 under `Kit/plugins/History/`, 7 `Modules/<X>/History.swift`, `Tests/History.swift`, and `docs/usage-history-design.md`.
+~155 lines of logic across 12 upstream files, every one a single hunk; the strings files are 41 more, but they are pure EOF appends and the lowest-risk hunk in the stack. Everything else is new files: 9 under `Kit/plugins/History/`, 7 `Modules/<X>/History.swift`, `Tests/History.swift`, and `docs/usage-history-design.md`.
 
 **Zero** edits to `Kit/plugins/DB.swift`, `Kit/lldb/*`, and — the invariant that §2's Net decision is bought with — any `Modules/*/main.swift` or `Modules/*/readers.swift`. Debug seeding lives in a new `#if DEBUG` file, never in `Stats/helpers.swift`. No zlib import and no edit to `Kit/Supporting Files/Kit.h` (CRC-32 is Swift, §3).
 
@@ -265,11 +266,11 @@ Stored: numeric series plus identifiers — SMC keys, GPU ids and models, volume
 1. `feat: history file skeleton and design doc` (~130) — all 17 new files as stubs, every pbxproj entry, `docs/usage-history-design.md`, and a stubbed `Tests/History.swift` that the next three commits grow
 2. `feat: fixed-size round-robin history archive` (~880, incl. ~25-line CRC-32, the free-space precondition and ~180 lines of archive tests)
 3. `feat: history lane registry, directory and bucket accumulators` (~450, incl. ~110 lines of registry and accumulator tests)
-4. `feat: history recorder with tiered commit, catch-up rollup and lane LRU` (~570, incl. ~140 lines of recorder, rollup and catch-up tests)
+4. `feat: history recorder with tiered commit and catch-up rollup` (~570, incl. ~140 lines of recorder, rollup and catch-up tests)
 5. `feat: sleep, wake and clock-step handling for history` (~130)
 6. `feat: history lane extraction in the module targets` (~330, seven module-target files: CPU, RAM, GPU, Net, Disk, Battery and Sensors)
 7. `feat: record history samples from Reader.callback` (~3, upstream)
-8. `feat: stored-history settings with master switch, size readout and delete` (~110, upstream)
+8. `feat: stored-history settings with switch, size and delete` (~110, upstream)
 9. `feat: battery history chart in the battery popup` (~60) — **end of release 1**
 
 **Release 2 (3.0.15.3) — read it.**

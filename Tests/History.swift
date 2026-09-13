@@ -1370,7 +1370,7 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(probe.recorder.status, .disabled)
 
         probe.now += TimeInterval(HistoryTier.t0.step)
-        probe.recorder.start()
+        probe.recorder.start(enabled: true)
         probe.recorder.waitUntilIdle()
         XCTAssertEqual(probe.recorder.status, .recording)
         XCTAssertFalse(probe.recorder.isCommitTimerRunning)
@@ -1389,6 +1389,60 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(slot.count, 1)
         XCTAssertEqual(slot.max, 3)
         XCTAssertEqual(probe.recorder.laneCount, 1)
+    }
+
+    // MARK: - settings (master switch, size readout, delete)
+
+    /// The Delete button's whole contract in one pass (§6): what was recorded
+    /// is gone, the lane registry that named it is gone with it, the archives
+    /// are back and empty, and the recorder keeps recording into them.
+    ///
+    /// The `.lock` file is asserted to survive on purpose. It is the one thing
+    /// in the directory this process still holds a `flock` on, and deleting it
+    /// would let a second copy of Stats create a fresh inode and take a lock
+    /// that excludes nobody.
+    func testDeleteAllEmptiesTheArchivesAndGoesOnRecording() throws {
+        let probe = try self.probe()
+        defer { probe.recorder.stop() }
+
+        probe.recorder.ingest(Probe.payload(42), reader: Probe.reader, interval: 1)
+        let bucket = HistoryClock.bucketIndex(probe.now, step: HistoryTier.t0.step)
+        probe.now += HistoryRecorder.commitInterval
+        probe.recorder.commitNow()
+
+        let recorded = try XCTUnwrap(probe.store.archive(.t0))
+        XCTAssertEqual(recorded.slot(bucket: bucket, lane: 0)?.max, 42)
+        XCTAssertEqual(probe.recorder.laneCount, 1)
+        // The readout the settings row shows: preallocated, so it is the whole
+        // Standard geometry rather than the handful of bytes just written.
+        XCTAssertGreaterThan(probe.store.bytesOnDisk, 0)
+
+        XCTAssertTrue(probe.recorder.deleteAll())
+
+        XCTAssertEqual(probe.recorder.laneCount, 0)
+        XCTAssertEqual(probe.recorder.status, .recording)
+        XCTAssertTrue(probe.store.holdsLock)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: probe.store.directory.appendingPathComponent(".lock").path
+        ))
+
+        let emptied = try XCTUnwrap(probe.store.archive(.t0))
+        XCTAssertEqual(emptied.laneCount, 0)
+        XCTAssertEqual(emptied.lastCommitBucket, 0)
+        XCTAssertNil(emptied.slot(bucket: bucket, lane: 0))
+
+        // And the lane comes back at id 0 in the new file, rather than the
+        // staged row of a deleted archive landing in the one that replaced it.
+        probe.now += TimeInterval(HistoryTier.t0.step)
+        probe.recorder.ingest(Probe.payload(7), reader: Probe.reader, interval: 1)
+        let next = HistoryClock.bucketIndex(probe.now, step: HistoryTier.t0.step)
+        probe.now += HistoryRecorder.commitInterval
+        probe.recorder.commitNow()
+
+        XCTAssertEqual(probe.recorder.laneCount, 1)
+        let reopened = try XCTUnwrap(probe.store.archive(.t0))
+        XCTAssertEqual(reopened.slot(bucket: next, lane: 0)?.max, 7)
+        XCTAssertNil(reopened.slot(bucket: bucket, lane: 0))
     }
 
     /// §2's whole concurrency story in one test: ingest on the main run loop —
@@ -1417,7 +1471,7 @@ final class HistoryTests: XCTestCase {
             availableSpace: { _ in Int64.max },
             isPowerConstrained: { false }
         ))
-        recorder.start()
+        recorder.start(enabled: true)
         recorder.waitUntilIdle()
         defer { recorder.stop() }
 
@@ -1605,7 +1659,7 @@ final class HistoryTests: XCTestCase {
         // A second launch twenty-five hours on: every slot in T0's 24 h ring
         // belongs to a window that has closed.
         let second = RecorderProbe(directory: directory, preset: .standard, now: probe.now + 25 * 3600)
-        second.recorder.start()
+        second.recorder.start(enabled: true)
         second.recorder.waitUntilIdle()
         defer { second.recorder.stop() }
 
@@ -2089,13 +2143,19 @@ final class HistoryTests: XCTestCase {
     /// A started recorder on a fresh directory. The clock starts five seconds
     /// into a bucket so that a one-second interval's span attribution stays
     /// inside it and the assertions can name single buckets.
+    ///
+    /// `enabled:` is passed explicitly, and every other `start` in this file
+    /// does the same. Its default argument is the stored master switch, and the
+    /// Tests target is hosted by Stats.app, so `Store` reads the *installed*
+    /// app's real preferences: a developer who turns the switch off in Stats
+    /// would otherwise find the whole suite red with no code change.
     private func probe(directory: URL? = nil, preset: HistoryRetentionPreset = .standard,
                       now: TimeInterval? = nil) throws -> RecorderProbe {
         let directory = directory ?? self.folder.appendingPathComponent("history")
         let aligned = (1_760_000_000 / TimeInterval(HistoryTier.t2.step)).rounded(.down)
             * TimeInterval(HistoryTier.t2.step) + 5
         let probe = RecorderProbe(directory: directory, preset: preset, now: now ?? aligned)
-        probe.recorder.start()
+        probe.recorder.start(enabled: true)
         probe.recorder.waitUntilIdle()
         return probe
     }

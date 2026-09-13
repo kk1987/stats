@@ -383,6 +383,33 @@ public final class HistoryAccumulatorTable {
         }
     }
 
+    // MARK: - discard everything the table holds
+
+    /// Empties every accumulator and every staged row, and forgets which bucket
+    /// was drained last.
+    ///
+    /// Two callers, for two different reasons: a backward clock step, below,
+    /// and `HistoryRecorder.deleteAll`, where the archives the staged rows were
+    /// bound for are about to be unlinked and a row that outlived them would be
+    /// written into the empty file that replaces them.
+    public func discardAll() {
+        self.locked { () -> Void in
+            for lane in 0..<self.capacity {
+                self.accumulators[lane].discard()
+            }
+            for row in 0..<HistoryAccumulatorTable.pendingBuckets {
+                // A staged row thrown away here is a closed bucket that went
+                // nowhere, which is precisely what `droppedBuckets` counts. A
+                // backward clock step is a legitimate way to produce one, and
+                // seeing it beats guessing at it.
+                if self.pendingCount[row] > 0 { self._droppedBuckets += 1 }
+                self.clearRowLocked(row)
+                self.pendingStamp[row] = nil
+            }
+            self.lastDrainedBucket = nil
+        }
+    }
+
     // MARK: - clock step
 
     /// Drops every bucket index the table holds, because a backward clock step
@@ -400,21 +427,7 @@ public final class HistoryAccumulatorTable {
     /// step is detected on the same sample that is about to be folded, and the
     /// reset has to happen between the two.
     public func resetForClockStep() {
-        self.locked { () -> Void in
-            for lane in 0..<self.capacity {
-                self.accumulators[lane].discard()
-            }
-            for row in 0..<HistoryAccumulatorTable.pendingBuckets {
-                // A staged row thrown away here is a closed bucket that went
-                // nowhere, which is precisely what `droppedBuckets` counts. A
-                // backward clock step is a legitimate way to produce one, and
-                // seeing it beats guessing at it.
-                if self.pendingCount[row] > 0 { self._droppedBuckets += 1 }
-                self.clearRowLocked(row)
-                self.pendingStamp[row] = nil
-            }
-            self.lastDrainedBucket = nil
-        }
+        self.discardAll()
     }
 
     /// A copy of one lane's fold state. For the settings readout and the tests;
