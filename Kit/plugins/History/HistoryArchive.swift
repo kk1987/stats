@@ -1210,6 +1210,11 @@ public final class HistoryStore {
         self.lock = nil
     }
 
+    /// Whether this process is the one recording. The delete path asks, because
+    /// unlinking archives another copy of Stats still has open would spend its
+    /// disk without freeing it (§3).
+    public var holdsLock: Bool { self.lock?.isHeld ?? false }
+
     // MARK: - free-space precondition
 
     /// The free-space precondition, split so the threshold itself is testable
@@ -1316,7 +1321,84 @@ public final class HistoryStore {
     }
 
     // MARK: - status and size readout (lane count, bytes on disk)
+
+    /// What the settings row puts next to the lane count (§6). Blocks on the
+    /// filesystem, so the caller keeps it off main.
+    ///
+    /// Allocated size rather than logical size, because that is the number
+    /// Finder shows and the number §3's ceiling is quoted in — and because the
+    /// tier files are preallocated, which is exactly the difference. Files the
+    /// store does not own are counted too: a quarantined `.corrupt-<ts>` still
+    /// costs the user disk, and a readout that hid it would understate the
+    /// directory it claims to measure.
+    ///
+    /// Safe from any thread. It touches only `directory`, which is a `let`, and
+    /// the filesystem; it reads none of the mutable state the rest of this
+    /// class keeps for the history queue.
+    public var bytesOnDisk: Int64 {
+        let keys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: self.directory, includingPropertiesForKeys: Array(keys)
+        ) else { return 0 }
+
+        var total: Int64 = 0
+        for url in contents {
+            guard let values = try? url.resourceValues(forKeys: keys) else { continue }
+            guard let bytes = values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize else {
+                continue
+            }
+            total += Int64(bytes)
+        }
+        return total
+    }
+
     // MARK: - deleteAll (quiesce, munmap, unlink, recreate)
+
+    /// Throws every byte of recorded history away and leaves an empty directory
+    /// behind. The Delete button in settings and `Reset settings` are the two
+    /// callers (§6).
+    ///
+    /// History queue only, and with ingest already quiesced: the mappings are
+    /// torn down here, and a commit racing that would be writing into a
+    /// descriptor this method is closing.
+    ///
+    /// Order matters and is the whole reason this is not a `removeItem` loop at
+    /// the call site. `closeAll()` runs first so every `mmap` is gone before the
+    /// file it maps is unlinked — §3's `SIGBUS` answer is that read mappings
+    /// "tear down on the history queue before any unlink", and nothing is ever
+    /// truncated. The `.lock` file is deliberately kept: this process still
+    /// holds a `flock` on that inode, and unlinking it would let a second copy
+    /// of Stats create a fresh one and take a lock that does not exclude ours.
+    @discardableResult
+    public func deleteAll() -> Bool {
+        self.closeAll()
+
+        let manager = FileManager.default
+        var ok = true
+        var contents: [URL] = []
+        do {
+            contents = try manager.contentsOfDirectory(at: self.directory, includingPropertiesForKeys: nil)
+        } catch let failure {
+            // An unreadable directory is the one failure that hides every
+            // other: the list comes back empty, the loop unlinks nothing and
+            // every single-file error it would have reported never happens.
+            ok = false
+            error("history: the directory could not be listed for a delete: \(failure)")
+        }
+        for url in contents where url.lastPathComponent != ".lock" {
+            do {
+                try manager.removeItem(at: url)
+            } catch let failure {
+                ok = false
+                error("history: \(url.lastPathComponent) could not be deleted: \(failure)")
+            }
+        }
+
+        // The directory itself survives a delete — it carries the Time Machine
+        // exclusion, and the caller is about to reopen into it.
+        if (try? HistoryStore.prepareDirectory(self.directory)) == nil { ok = false }
+        return ok
+    }
 }
 
 // MARK: - bytes

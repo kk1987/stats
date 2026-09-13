@@ -83,6 +83,8 @@ class ApplicationSettings: NSStackView {
     
     private var planField: NSTextField?
     
+    private let historyView: HistorySettingsView = HistorySettingsView()
+    
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: Constants.Settings.width, height: Constants.Settings.height))
         self.translatesAutoresizingMaskIntoConstraints = false
@@ -188,6 +190,8 @@ class ApplicationSettings: NSStackView {
         self.remoteView?.setRowVisibility(6, newState: false)
         self.remoteView?.setRowVisibility(7, newState: false)
         
+        scrollView.stackView.addArrangedSubview(self.historyView)
+
         scrollView.stackView.addArrangedSubview(PreferencesSection(title: localizedString("Settings"), [
             PreferencesRow(
                 localizedString("Export settings"),
@@ -255,6 +259,7 @@ class ApplicationSettings: NSStackView {
     }
     
     internal func viewWillAppear() {
+        self.historyView.refresh()
         self.startAtLoginBtn?.state = LaunchAtLogin.isEnabled ? .on : .off
         self.remoteControlBtn?.state = SystemStats.shared.control ? .on : .off
         
@@ -451,13 +456,17 @@ class ApplicationSettings: NSStackView {
     @objc private func resetSettings() {
         let alert = NSAlert()
         alert.messageText = localizedString("Reset settings")
-        alert.informativeText = localizedString("Reset settings text")
+        alert.informativeText = "\(localizedString("Reset settings text"))\n\n\(localizedString("Recorded usage history will also be deleted."))"
         alert.alertStyle = .warning
         alert.addButton(withTitle: localizedString("Yes"))
         alert.addButton(withTitle: localizedString("No"))
         
         if alert.runModal() == .alertFirstButtonReturn {
             Store.shared.reset()
+            // Synchronous, and between the reset and the relaunch on purpose: a
+            // delete still in flight would race the new process, which takes the
+            // flock and opens the very files this one is unlinking (§6).
+            HistoryRecorder.shared.deleteAll()
             restartApp(self)
         }
     }

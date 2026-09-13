@@ -257,10 +257,28 @@ public final class HistoryRecorder {
 
     // MARK: - lifecycle (start from AppDelegate, flush on terminate)
 
+    /// Where the settings master switch is persisted. `*_state` is the app's
+    /// own spelling for a stored toggle (`systemWidgetsUpdates_state`).
+    public static let settingsKey: String = "history_state"
+
+    /// The master switch as the user last left it. **ON by default**: a
+    /// retrospective feature that is off when the anomaly happens is worthless,
+    /// and §3's numbers — ~20 MB at first launch, a hard 244.5 MB ceiling — are
+    /// what make that defensible (§6).
+    ///
+    /// This is the *preference*, not the live state: `isRecording` is what the
+    /// hot path reads, and it is false until `start` has actually opened the
+    /// archives. The two disagree for the milliseconds of a start, and for as
+    /// long as a second copy of Stats holds the flock.
+    public static var isEnabledInSettings: Bool {
+        get { Store.shared.bool(key: HistoryRecorder.settingsKey, defaultValue: true) }
+        set { Store.shared.set(key: HistoryRecorder.settingsKey, value: newValue) }
+    }
+
     /// Master switch, read as the first statement of `ingest`. ON by default:
     /// a retrospective feature that is off when the anomaly happens is
-    /// worthless (§6). The value the app starts with comes from `Store`, with a
-    /// default of `true`, in the commit that adds the settings switch.
+    /// worthless (§6). The value the app starts with is `isEnabledInSettings`,
+    /// which is this call's default argument.
     ///
     /// Read under `lock` rather than as a plain load. Every reader queue —
     /// including main, for Battery's IOPS callback — reads it while the
@@ -287,7 +305,12 @@ public final class HistoryRecorder {
     /// catch-up has run, because folding into a table whose lane ids are about
     /// to be re-pointed by the stored directory would attribute samples to the
     /// wrong series. A reader tick is one second; the start is milliseconds.
-    public func start(enabled: Bool = true) {
+    ///
+    /// The default argument is the stored master switch, so `AppDelegate` keeps
+    /// the one-line call §9 budgets for it and a switch the user turned off
+    /// last week means zero ingest and zero writes from launch — not a recorder
+    /// that records until the settings panel is first opened.
+    public func start(enabled: Bool = HistoryRecorder.isEnabledInSettings) {
         self.queue.async { self.performStart(enabled: enabled) }
     }
 
@@ -346,6 +369,95 @@ public final class HistoryRecorder {
         }
         guard changed, !enabled else { return }
         self.queue.async { self.commit(at: self.environment.now()) }
+    }
+
+    // MARK: - deleteAll (quiesce, unmap, unlink, recreate)
+
+    /// Deletes every recorded byte and comes back recording into empty
+    /// archives. The Delete button in settings and `Reset settings` are the two
+    /// callers (§6).
+    ///
+    /// Synchronous, and that is a requirement rather than a convenience:
+    /// `resetSettings` calls `restartApp` on the next line, and a delete still
+    /// in flight would race the relaunch — the new process would take the flock
+    /// and open the very files this one is unlinking.
+    ///
+    /// The sequence is the one §3 and risk 5 ask for, in order. Ingest is
+    /// quiesced first, so nothing is folding while the table is emptied. The
+    /// staged rows go next: they were drained for archives that are about to
+    /// stop existing, and writing them into the empty files that replace them
+    /// would resurrect a slice of the history the user just deleted. Only then
+    /// are the mappings torn down and the files unlinked, on this queue, with
+    /// nothing truncated. The archives reopen empty, and the stored directory
+    /// they come back with — none — is what re-points the lane registry, so no
+    /// lane id survives into a matrix that has no column for it.
+    ///
+    /// What is deliberately *not* touched is the `flock` on `history/.lock`:
+    /// keeping it is what stops a second copy of Stats from slipping in between
+    /// the unlink and the reopen. The master switch is not touched either; a
+    /// user who deletes the history is not asking to stop recording it.
+    ///
+    /// Must not be called from the history queue.
+    @discardableResult
+    public func deleteAll() -> Bool {
+        var deleted = true
+        self.queue.sync {
+            // The files belong to whoever holds the flock. A copy of Stats that
+            // lost the race must not unlink the winner's archives: the winner
+            // keeps its descriptors, goes on writing into inodes nothing can
+            // open any more, and the disk they cost stays spent until it quits.
+            //
+            // Asked here rather than before the hop, because `HistoryStore` is
+            // the history queue's alone: `performStart` assigns the lock and the
+            // open-failure path releases it, so reading it from main would race
+            // a start still in flight — and drop the last reference to the
+            // `HistoryLock` out from under a caller that had just loaded it.
+            guard self.store.holdsLock else {
+                error("history: nothing was deleted, the archives are not locked by this process")
+                deleted = false
+                return
+            }
+
+            // The recorder lock, not the store, guards these two — safe on this
+            // queue, and an ingest already past `guard self.recording` holds it
+            // for its whole fold, so the quiesce is complete before the table is
+            // emptied below.
+            let enabled = self.isRecording
+            self.setRecordingFlag(false)
+
+            self.parkTimerForGood()
+            self.table.discardAll()
+            deleted = self.store.deleteAll()
+            // The sidecar went with the archives; this is what drops the spans
+            // still held in memory, which would otherwise be written straight
+            // back out on the next sleep.
+            self.sleepMonitor.load()
+
+            self.commitCount = 0
+            self.consecutiveFailures = 0
+            self.suspendedUntil = 0
+            self.isLowOnSpace = false
+            self.needsFreeSpaceCheck = true
+            self.lastRolledUp.removeAll()
+            self.appliedRevision = 0
+            let now = self.environment.now()
+            self.lastSyncTs = now
+            self.lastDirectoryWriteTs = now
+
+            do {
+                try self.store.open(preset: self.preset)
+            } catch let failure {
+                error("history: the archives could not be reopened after a delete: \(failure)")
+                self.setStatus(.writeFailures)
+                deleted = false
+                return
+            }
+
+            self.locked { self.directory.adopt([]) }
+            self.setRecordingFlag(enabled)
+            self.setStatus(enabled ? .recording : .disabled)
+        }
+        return deleted
     }
 
     /// `fsync` now, whatever the cadence says: sleep and
