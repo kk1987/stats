@@ -58,6 +58,25 @@ public final class HistoryRecorder {
     /// launch and lose its data to LRU.
     public static let directoryFlushInterval: TimeInterval = 3_600
 
+    /// How much of a hole a launch has to find before it writes a
+    /// `NOT_RUNNING` span. Two T0 buckets: anything shorter is the ordinary
+    /// gap between the last commit of one run and the first of the next.
+    public static let downTimeFloor: TimeInterval = 2 * TimeInterval(HistoryTier.t0.step)
+
+    /// How far the wall clock and the continuous clock may disagree about how
+    /// long the app was down before the gap is called a clock step rather than
+    /// a quit.
+    ///
+    /// The two ends of that comparison are not taken at the same instant: the
+    /// anchor is read at a commit, while the gap is dated from the bucket after
+    /// `lastCommitBucket`, which is up to a whole commit period earlier. So the
+    /// comparison is good to a commit period plus a bucket plus §4's own 2 s,
+    /// and nothing finer is claimed. Every clock change this is meant to catch
+    /// — a DST hour, a timezone, an NTP correction worth noticing — is minutes
+    /// or hours, not seconds.
+    public static let downTimeTolerance: TimeInterval =
+        HistoryRecorder.commitInterval + TimeInterval(HistoryTier.t0.step) + HistoryClock.stepThreshold
+
     // MARK: - environment
 
     /// Everything the recorder reads from outside itself. A struct of closures
@@ -67,13 +86,19 @@ public final class HistoryRecorder {
     /// need a full volume to provoke.
     public struct Environment {
         public var now: () -> TimeInterval
+        /// `mach_continuous_time()` in seconds. Injected for the same reason as
+        /// the wall clock: a clock step is defined as the two disagreeing, so a
+        /// test that cannot move them independently cannot produce one at all.
+        public var monotonicNow: () -> TimeInterval
         public var availableSpace: (URL) -> Int64?
         public var isPowerConstrained: () -> Bool
 
         public init(now: @escaping () -> TimeInterval,
                     availableSpace: @escaping (URL) -> Int64?,
-                    isPowerConstrained: @escaping () -> Bool) {
+                    isPowerConstrained: @escaping () -> Bool,
+                    monotonicNow: @escaping () -> TimeInterval = HistoryClock.monotonicNow) {
             self.now = now
+            self.monotonicNow = monotonicNow
             self.availableSpace = availableSpace
             self.isPowerConstrained = isPowerConstrained
         }
@@ -99,6 +124,10 @@ public final class HistoryRecorder {
     private let table: HistoryAccumulatorTable
     private let directory = HistoryLaneDirectory()
     private var sink = HistorySink()
+    /// The recorder's own sleep/wake observers and the span sidecar gaps are
+    /// derived from. There is no app-wide observer to reuse — the only two in
+    /// the app live in Sensors and Bluetooth (§4).
+    private let sleepMonitor: HistorySleepMonitor
 
     /// Heap allocated because macOS 12 rules out `OSAllocatedUnfairLock` and an
     /// `os_unfair_lock` stored inline in a class would be moved by the compiler.
@@ -120,6 +149,9 @@ public final class HistoryRecorder {
     /// free: a fold and the flag it sets are one atomic step against the
     /// commit's "is it clean" check and the clear that follows it.
     private var timerWanted: Bool = false
+    /// The wall/continuous pair every sample is measured against (§4). Guarded
+    /// by `lock` because it is read and advanced from every reader queue.
+    private var clock = HistoryClockTracker()
 
     // History queue only.
     private var timer: DispatchSourceTimer?
@@ -149,8 +181,18 @@ public final class HistoryRecorder {
         self.preset = preset
         self.environment = environment
         self.table = HistoryAccumulatorTable(step: HistoryTier.t0.step)
+        self.sleepMonitor = HistorySleepMonitor(
+            url: store.directory.appendingPathComponent(HistorySleepMonitor.fileName),
+            now: environment.now
+        )
         self.lock = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
         self.lock.initialize(to: os_unfair_lock())
+
+        // The observers only report; everything they lead to — the span, the
+        // flush, the tier reconciliation — is this object's, so that the same
+        // path runs whether the event came from `NSWorkspace` or from a test.
+        self.sleepMonitor.onSleep = { [weak self] ts in self?.noteWillSleep(at: ts) }
+        self.sleepMonitor.onWake = { [weak self] ts in self?.noteDidWake(at: ts) }
     }
 
     deinit {
@@ -214,6 +256,11 @@ public final class HistoryRecorder {
     ///
     /// Must not be called from the history queue.
     public func stop() {
+        // Unregistered before the queue rather than on it, because
+        // `removeObserver` is Foundation's to schedule and a stop that waits
+        // for an observer block which is itself waiting for this queue would
+        // be a deadlock of our own making.
+        self.sleepMonitor.stop()
         self.queue.sync {
             self.setRecordingFlag(false)
             self.commit(at: self.environment.now())
@@ -227,6 +274,14 @@ public final class HistoryRecorder {
             // the process singleton be deallocated.
             self.locked { self.sink.prepare(registry: nil, at: 0) }
         }
+        // Again, and not redundantly: `start` is asynchronous, so a
+        // `start(); stop()` in quick succession can have registered the
+        // observers on the history queue while the first call was still
+        // looking at an empty array. The `queue.sync` above is the barrier
+        // that proves `performStart` has run, and this takes off anything it
+        // left behind — observers on a recorder whose archives are closed and
+        // whose cross-process lock is released.
+        self.sleepMonitor.stop()
     }
 
     /// The settings master switch. Turning it off stops ingest immediately;
@@ -327,6 +382,9 @@ public final class HistoryRecorder {
         let now = self.environment.now()
         self.lastSyncTs = now
         self.lastDirectoryWriteTs = now
+        self.locked { self.clock.anchor(wall: now, monotonic: self.environment.monotonicNow()) }
+        // Loads the sidecar and registers the willSleep/didWake observers.
+        self.sleepMonitor.start()
 
         // Lane ids are positions in the stored directory, so the directory the
         // archive came back with *is* the registry: rebuilding it from scratch
@@ -341,6 +399,13 @@ public final class HistoryRecorder {
                 return self.directory.revision
             }
         }
+
+        // What the clock did while the app was down. The span is taken first:
+        // it is dated from the stored `lastCommitBucket`, which a reset is
+        // about to put back to zero, and a downtime long enough to strand a
+        // tier is exactly the one worth naming (§4).
+        self.noteDownTime(at: now)
+        self.resetTiersStrandedByTheClock(at: now)
 
         // Every coarse bucket that closed while the app was down, before the
         // first live commit (§3).
@@ -377,22 +442,43 @@ public final class HistoryRecorder {
     /// registry, and it is safe because the only thing a conformance may do is
     /// materialize its own payload array — never call back into the recorder.
     public func ingest<T>(_ value: T, reader: HistoryReaderKey, interval: TimeInterval? = nil) {
-        let wake = self.locked { () -> Bool in
-            guard self.recording else { return false }
-            guard let provider = value as? HistoryProvider else { return false }
+        var stepped: (step: HistoryClockStep, at: TimeInterval)?
+        var wake = false
+        self.locked { () -> Void in
+            guard self.recording else { return }
+            guard let provider = value as? HistoryProvider else { return }
 
             // `isFinite` as well as positive: the conversion on the next line
             // traps on an infinity, and the clock is injectable.
             let now = self.environment.now()
-            guard now > 0, now.isFinite else { return false }
+            guard now > 0, now.isFinite else { return }
+
+            // §4: the continuous clock is read alongside the wall clock here,
+            // inside the bucket computation — not once per commit, which would
+            // let a whole commit period of samples land in the wrong bucket
+            // before anything noticed. The bucket index itself is recomputed by
+            // the accumulator table from the same `now`; what this call is for
+            // is the divergence the table cannot see.
+            let reading = self.clock.bucket(at: now, step: HistoryTier.t0.step,
+                                            monotonic: self.environment.monotonicNow())
+            if reading.step.isStep { stepped = (reading.step, now) }
+            // A backward step makes every bucket index the table holds a future
+            // one, and a table clamped to a future bucket records nothing at
+            // all. It has to be dropped between detecting the step and folding
+            // the sample that detected it.
+            if case .backward = reading.step { self.table.resetForClockStep() }
+
             self.sink.prepare(registry: self, at: UInt64(now))
             provider.emitHistory(reader: reader, into: &self.sink)
-            guard !self.sink.isEmpty else { return false }
+            guard !self.sink.isEmpty else { return }
 
             self.table.fold(self.sink, at: now, interval: interval ?? 0)
-            guard !self.timerWanted else { return false }
+            guard !self.timerWanted else { return }
             self.timerWanted = true
-            return true
+            wake = true
+        }
+        if let stepped = stepped {
+            self.queue.async { self.handleClockStep(stepped.step, at: stepped.at) }
         }
         guard wake else { return }
         self.queue.async { self.startTimer() }
@@ -499,6 +585,12 @@ public final class HistoryRecorder {
         // hold. Nothing is written until there is room again.
         guard !self.isLowOnSpace else { return }
 
+        // Cheap enough to run every cycle — one bucket index and one comparison
+        // per tier — and it has to run somewhere the app is not restarting: a
+        // machine left asleep for a week reaches this before it reaches a
+        // relaunch (§4).
+        self.resetTiersStrandedByTheClock(at: now)
+
         do {
             try self.applyDirectoryIfNeeded(at: now)
             try self.commitT0(at: now)
@@ -529,8 +621,13 @@ public final class HistoryRecorder {
         // down because the ordering is what makes it harmless, and the ordering
         // is not obvious from either side.
         let currentBucket = HistoryClock.bucketIndex(now, step: HistoryTier.t0.step)
-        let rows = self.table.drain(before: currentBucket, lanes: lanes)
+        let rows = HistoryRecorder.rowsClearOfThePreStepEra(self.table.drain(before: currentBucket, lanes: lanes),
+                                                            in: t0)
         guard !rows.isEmpty else { return }
+        // The anchor and `lastCommitBucket` are only meaningful as a pair, so
+        // it is staged into the header the commit below is about to write
+        // rather than written beside it (§4).
+        t0.stageMonotonicAnchor(UInt64(Swift.max(0, self.environment.monotonicNow())))
         try t0.commit(rows)
 
         // `commit` is what moves a lane's `firstValidBucket`, and the registry
@@ -621,6 +718,7 @@ public final class HistoryRecorder {
                 rows.append(row)
             }
         }
+        rows = HistoryRecorder.rowsClearOfThePreStepEra(rows, in: archive)
         guard !rows.isEmpty else {
             self.lastRolledUp[tier] = current &- 1
             return
@@ -664,6 +762,233 @@ public final class HistoryRecorder {
             slots.append(rolled)
         }
         return any ? HistoryRow(bucket: bucket, slots: slots) : nil
+    }
+
+    // MARK: - sleep, wake and the clock (§4)
+
+    /// The spans gap reasons are derived from: sleeps the observers saw, the
+    /// stretches launches found between a last commit and a first one, and the
+    /// stretches a clock step moved the wall clock across.
+    public var gapSpans: [HistoryGapSpan] { self.sleepMonitor.spans }
+
+    /// What a read of one lane needs to turn an empty bucket into a sentence:
+    /// the lane's `firstValidBucket`, the tier's `lastCommitBucket` and the
+    /// spans. Snapshotted together, because a resolver built from a mixture of
+    /// two commits' bookkeeping could contradict itself.
+    ///
+    /// Must not be called from the history queue.
+    public func gapResolver(tier: HistoryTier, lane: Int) -> HistoryGapResolver? {
+        let spans = self.sleepMonitor.spans
+        return self.queue.sync { () -> HistoryGapResolver? in
+            guard let archive = self.store.archive(tier), let entry = archive.entry(lane: lane) else { return nil }
+            return HistoryGapResolver(step: tier.step, firstValidBucket: entry.firstValidBucket,
+                                      lastCommitBucket: archive.lastCommitBucket, spans: spans)
+        }
+    }
+
+    /// The machine is going to sleep. Opens the span, commits what the
+    /// accumulators hold and flushes — §3's "fsync on sleep" — then gives the
+    /// timer up, because nothing will tick until the next sample after wake and
+    /// a timer left armed across a nine-hour sleep is a wakeup the feature does
+    /// not need.
+    ///
+    /// Synchronous: a handler that returns before the data is on disk has not
+    /// flushed anything, and `NSWorkspace.willSleepNotification` is delivered
+    /// with time in hand for exactly this.
+    ///
+    /// Must not be called from the history queue.
+    public func noteWillSleep(at ts: TimeInterval) {
+        self.sleepMonitor.noteSleep(at: ts)
+        self.queue.sync {
+            self.commit(at: ts)
+            self.store.sync()
+            self.lastSyncTs = ts
+            self.parkTimerForGood()
+        }
+    }
+
+    /// The machine woke. Closes the span and looks at what the sleep did to the
+    /// tiers — a sleep longer than T0's 24 h leaves its whole ring stale.
+    ///
+    /// The clock tracker is deliberately *not* re-anchored: `mach_continuous_time`
+    /// counts through sleep, so the two clocks still agree and a wake is not a
+    /// step. Re-anchoring here would be the one thing that could hide a genuine
+    /// clock change made while the machine was asleep, which is when a timezone
+    /// or NTP correction is most likely to land.
+    public func noteDidWake(at ts: TimeInterval) {
+        self.sleepMonitor.noteWake(at: ts)
+        self.queue.async { self.resetTiersStrandedByTheClock(at: ts) }
+    }
+
+    /// A clock step, on the history queue.
+    ///
+    /// A **forward** step needs no action on the archive: the ring advances and
+    /// the slots it skipped read as no-data by their stamps. What it does need
+    /// is the span, because "Clock changed" is otherwise indistinguishable from
+    /// "nothing was recorded" — and a span is a line in a sidecar, not a pass
+    /// over a ring.
+    ///
+    /// A **backward** step resets the tiers it stepped clean past and leaves
+    /// the rest to `rowsClearOfThePreStepEra`, which is what keeps the re-lived
+    /// buckets' pre-step slots. The accumulator table was already dropped, at
+    /// ingest, under the lock.
+    private func handleClockStep(_ step: HistoryClockStep, at now: TimeInterval) {
+        switch step {
+        case .none:
+            return
+        case .forward(let delta):
+            // The stretch the wall clock jumped over: nothing was recorded in
+            // it and nothing ever will be.
+            self.noteSpan(from: now - delta, to: now, reason: .clockStep)
+        case .backward(let delta):
+            // The stretch that is about to be re-lived. It already holds
+            // pre-step data, so the span is what says why the two eras meet
+            // where they do.
+            self.noteSpan(from: now, to: now + delta, reason: .clockStep)
+            // Coarse-tier scan cursors are bucket indices from the era that
+            // just ended.
+            self.lastRolledUp.removeAll()
+        }
+        self.resetTiersStrandedByTheClock(at: now)
+    }
+
+    /// Resets any tier the clock has moved at least a whole ring away from.
+    ///
+    /// This is both of §4's reset rules, which turn out to be one condition: a
+    /// backward step larger than a tier's window, and a gap at or beyond that
+    /// tier's capacity. Either way every slot in the ring belongs to another
+    /// era, and §4 is explicit that the answer is to reset the tier rather than
+    /// to iterate the ring writing no-data into 17,520 rows.
+    private func resetTiersStrandedByTheClock(at now: TimeInterval) {
+        for tier in self.preset.tiers {
+            guard let archive = self.store.archive(tier), archive.laneCount > 0 else { continue }
+            let last = archive.lastCommitBucket
+            guard last > 0 else { continue }
+            let current = HistoryClock.bucketIndex(now, step: tier.step)
+            let distance = current >= last ? current - last : last - current
+            guard distance >= UInt32(tier.buckets) else { continue }
+
+            do {
+                try archive.discardAll()
+                error("history: \(tier.fileName) reset, the clock moved \(distance) buckets past its \(tier.buckets)-bucket ring")
+                self.lastRolledUp[tier] = nil
+                // `reconcile` takes `firstValidBucket` from the archive's own
+                // copy, so the registry cannot write a stale one back over the
+                // reset. What it can do is keep serving one to everything else
+                // that reads the registry — the sidebar, the LRU — so the
+                // registry is corrected below, and the applied revision is
+                // dropped so that the correction reaches all three tier files
+                // at the next commit rather than at the next lane change.
+                self.appliedRevision = 0
+                if tier == .t0 {
+                    self.locked {
+                        for lane in 0..<archive.laneCount {
+                            self.directory.setFirstValidBucket(HistoryLaneEntry.noValidBucket, lane: lane)
+                        }
+                    }
+                }
+            } catch let failure {
+                self.recordFailure(failure)
+                // A reset that throws can leave the tier unusable rather than
+                // merely unreset: `discardAll` closes the file before it
+                // recreates it, and the directory write at the end of it goes
+                // through `rebuild`, whose own failure path resets the archive
+                // to no lanes at all. Neither state announces itself — the
+                // archive still answers `store.archive(tier)`, `commitT0` and
+                // the rollup both return early on an empty lane count, and the
+                // guard at the top of this loop skips a laneless tier forever,
+                // so the tier would record nothing until the next launch while
+                // the status still read "recording". A tier that did not come
+                // back from its reset is therefore dropped outright, which is
+                // the one outcome every caller already handles, and the status
+                // says so instead of waiting for two more strikes.
+                guard !archive.isOpen || archive.laneCount == 0 else { continue }
+                error("history: \(tier.fileName) did not come back from its reset and is closed")
+                self.store.drop(tier)
+                self.lastRolledUp[tier] = nil
+                self.setStatus(.writeFailures)
+            }
+        }
+    }
+
+    /// The hole a launch finds between the last commit of the previous run and
+    /// now, as a span. This is the whole of "Stats was not running": §2 has no
+    /// notification to hang it on, and §4 says it follows from
+    /// `lastCommitBucket` — which is exactly what this reads.
+    ///
+    /// It is also the one place the stored monotonic anchor earns its four
+    /// bytes. If the continuous clock has not gone backwards since the anchor
+    /// was written, the machine did not reboot, and the two clocks can be
+    /// compared across the downtime: a wall-clock gap that the continuous clock
+    /// does not agree with means the clock was set while Stats was down, and
+    /// the span says so rather than blaming the app for being closed.
+    private func noteDownTime(at now: TimeInterval) {
+        guard let t0 = self.store.archive(.t0), t0.lastCommitBucket > 0 else { return }
+        // The last commit closed that bucket, so the run reached at least its
+        // end; dating the gap from there rather than from its start keeps the
+        // span off a bucket that has data in it.
+        let last = HistoryClock.bucketStart(t0.lastCommitBucket &+ 1, step: HistoryTier.t0.step)
+
+        // The clock went backwards while the app was down: the stretch between
+        // the two is not downtime at all, it is a region that already holds
+        // pre-step data.
+        guard now > last else {
+            self.noteSpan(from: now, to: last, reason: .clockStep)
+            return
+        }
+        guard now - last > HistoryRecorder.downTimeFloor else { return }
+
+        var reason: HistoryGapReason = .notRunning
+        let anchor = TimeInterval(t0.monotonicAnchor)
+        let monotonic = self.environment.monotonicNow()
+        if anchor > 0, monotonic >= anchor,
+           abs((now - last) - (monotonic - anchor)) > HistoryRecorder.downTimeTolerance {
+            reason = .clockStep
+        }
+        self.noteSpan(from: last, to: now, reason: reason)
+    }
+
+    private func noteSpan(from: TimeInterval, to: TimeInterval, reason: HistoryGapReason) {
+        guard from > 0, from.isFinite, to.isFinite, to > from else { return }
+        self.sleepMonitor.note(HistoryGapSpan(from: UInt64(from), to: UInt64(to), reason: reason))
+    }
+
+    /// Drops the rows a backward clock step would have overwritten pre-step
+    /// slots with (§4).
+    ///
+    /// `lastCommitBucket` never moves backwards, so it is the high-water mark
+    /// of every era the archive has lived through: a row at or below it whose
+    /// ring cell already carries that exact bucket stamp is a cell the pre-step
+    /// era wrote, and this is where the rule that it is never overwritten
+    /// lives — the archive itself has no notion of an era to filter on, and
+    /// says so.
+    ///
+    /// In forward-running time the first comparison settles it: the drain only
+    /// ever hands up buckets past the high-water mark, so the common path is
+    /// one `UInt32` compare per commit and no stamp reads at all.
+    ///
+    /// What that costs, stated plainly because it is a behaviour and not an
+    /// implementation detail: for the length of a backward step **no tier
+    /// records anything at all**. The re-lived buckets are exactly the ones
+    /// the pre-step era stamped, so every row the drain hands up is dropped
+    /// here, on T0 and on the coarse tiers alike, until the wall clock has
+    /// caught back up to the high-water mark. A clock set back an hour is
+    /// therefore an hour of no-data, with the `CLOCK_STEP` span the reason
+    /// the chart shows for it. §4 takes that trade deliberately: the
+    /// alternative is two eras interleaved in one ring with no way to tell
+    /// which measurement belongs to which.
+    private static func rowsClearOfThePreStepEra(_ rows: [HistoryRow], in archive: HistoryArchive) -> [HistoryRow] {
+        let highWater = archive.lastCommitBucket
+        guard highWater > 0, rows.contains(where: { $0.bucket <= highWater }) else { return rows }
+
+        let lanes = archive.laneCount
+        return rows.filter { row in
+            guard row.bucket <= highWater else { return true }
+            for lane in 0..<lanes where archive.stamp(bucket: row.bucket, lane: lane) == row.bucket {
+                return false
+            }
+            return true
+        }
     }
 
     // MARK: - failure handling (free-space precondition, three strikes)

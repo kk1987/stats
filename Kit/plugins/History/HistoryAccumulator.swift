@@ -257,6 +257,21 @@ public struct HistoryAccumulator {
     public func isHolding(at now: TimeInterval) -> Bool {
         self.kind == .step && self.lastSampleTs > 0 && now < self.holdUntil
     }
+
+    // MARK: - clock step
+
+    /// Drops everything that is expressed in pre-step time, keeping only the
+    /// lane's `kind`.
+    ///
+    /// After a backward clock step every one of these fields is a statement
+    /// about a wall clock that no longer runs: the open bucket is in the
+    /// future, `lastSampleTs` would make the next rate's `dt` negative and the
+    /// sample be dropped, and `holdUntil` would hold a step lane's value across
+    /// buckets that are about to be re-lived. Keeping the kind is what lets the
+    /// lane carry on recording immediately (§4).
+    public mutating func discard() {
+        self = HistoryAccumulator(kind: self.kind)
+    }
 }
 
 // MARK: - accumulator table
@@ -365,6 +380,40 @@ public final class HistoryAccumulatorTable {
                 }
             }
             if lane >= self.lanes { self.lanes = lane + 1 }
+        }
+    }
+
+    // MARK: - clock step
+
+    /// Drops every bucket index the table holds, because a backward clock step
+    /// has made all of them future ones.
+    ///
+    /// Without this the table would refuse to record for the whole length of
+    /// the step: `lastDrainedBucket` is a pre-step bucket, `foldLocked` clamps
+    /// a sample's span to `lastDrainedBucket + 1`, and the clamp would then sit
+    /// past the bucket the sample actually belongs to and reject it. Staged
+    /// slots go with it — they are already in the archive's hands or they are
+    /// not, and re-offering them under the new clock would stamp pre-step
+    /// measurements onto re-lived buckets, which is the interleaving §4 forbids.
+    ///
+    /// Only the recorder calls this, from `ingest`, with its own lock held: the
+    /// step is detected on the same sample that is about to be folded, and the
+    /// reset has to happen between the two.
+    public func resetForClockStep() {
+        self.locked { () -> Void in
+            for lane in 0..<self.capacity {
+                self.accumulators[lane].discard()
+            }
+            for row in 0..<HistoryAccumulatorTable.pendingBuckets {
+                // A staged row thrown away here is a closed bucket that went
+                // nowhere, which is precisely what `droppedBuckets` counts. A
+                // backward clock step is a legitimate way to produce one, and
+                // seeing it beats guessing at it.
+                if self.pendingCount[row] > 0 { self._droppedBuckets += 1 }
+                self.clearRowLocked(row)
+                self.pendingStamp[row] = nil
+            }
+            self.lastDrainedBucket = nil
         }
     }
 
