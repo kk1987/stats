@@ -1391,6 +1391,39 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(probe.recorder.laneCount, 1)
     }
 
+    /// The suite is hosted by Stats.app, so the real `AppDelegate` has already
+    /// run by the time this executes and has already called
+    /// `HistoryRecorder.shared.start()`. That must have done nothing: the
+    /// shared recorder is pointed at the developer's own
+    /// `~/Library/Application Support/Stats/history`, and a test run has no
+    /// business creating it, taking its `flock` — against a Stats in the menu
+    /// bar that already holds it — or writing a sample into it.
+    ///
+    /// Nothing is asserted about the filesystem, deliberately: that directory
+    /// legitimately exists on a machine where Stats is installed, so the
+    /// evidence is the recorder's own state and the lock it never took.
+    func testTheSharedRecorderStaysIdleUnderTheTestHost() throws {
+        XCTAssertTrue(HistoryRecorder.isRunningUnderTestHost)
+
+        // Called again here rather than trusting the launch: the guard is in
+        // `start` itself, so this is the same path `AppDelegate` took.
+        HistoryRecorder.shared.start()
+        HistoryRecorder.shared.waitUntilIdle()
+
+        XCTAssertFalse(HistoryRecorder.shared.isRecording)
+        XCTAssertEqual(HistoryRecorder.shared.status, .disabled)
+        XCTAssertEqual(HistoryRecorder.shared.laneCount, 0)
+        XCTAssertFalse(HistoryStore.shared.holdsLock)
+
+        // And the seam the guard is cut at: a recorder the test owns, on a
+        // temporary directory, starts exactly as it does in the app.
+        let probe = try self.probe()
+        defer { probe.recorder.stop() }
+        XCTAssertTrue(probe.recorder.isRecording)
+        XCTAssertEqual(probe.recorder.status, .recording)
+        XCTAssertTrue(probe.store.holdsLock)
+    }
+
     // MARK: - settings (master switch, size readout, delete)
 
     /// The Delete button's whole contract in one pass (§6): what was recorded
