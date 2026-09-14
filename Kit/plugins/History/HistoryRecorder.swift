@@ -995,6 +995,61 @@ public final class HistoryRecorder {
         }
     }
 
+    // MARK: - read-side query (columns for the chart)
+
+    /// The plan a range resolves to right now, against the tiers this store
+    /// actually has open. The chart asks for it separately from the data
+    /// because the x axis and the column geometry are the same whether or not
+    /// a lane has anything in them.
+    ///
+    /// Must not be called from the history queue.
+    public func plan(for range: HistoryRange, maxColumns: Int = HistoryColumnPlan.columnCap,
+                     at now: TimeInterval? = nil) -> HistoryColumnPlan {
+        let when = now ?? self.environment.now()
+        let tiers = self.queue.sync { self.store.openTiers }
+        return HistoryColumnPlan.plan(for: range, endingAt: when, maxColumns: maxColumns, tiers: tiers)
+    }
+
+    /// Reads a range for a set of lanes and hands the answer to `completion` on
+    /// main.
+    ///
+    /// Asynchronous on purpose. §7 budgets the first paint at < 50 ms and puts
+    /// the aggregation "on the history queue", because a 1-year read is a
+    /// 15–40 MB pass over a mapped file and main is where the app draws; the
+    /// completion carries ~1,460 columns per lane and never the decoded series.
+    /// The queue is the same one the commit timer runs on, so a read waits for
+    /// at most one commit rather than contending with it.
+    ///
+    /// Must not be called from the history queue.
+    public func query(lanes: [Int], range: HistoryRange,
+                      maxColumns: Int = HistoryColumnPlan.columnCap, at now: TimeInterval? = nil,
+                      completion: @escaping (HistoryQueryResult) -> Void) {
+        let when = now ?? self.environment.now()
+        let spans = self.sleepMonitor.spans
+        self.queue.async {
+            let plan = HistoryColumnPlan.plan(for: range, endingAt: when, maxColumns: maxColumns,
+                                              tiers: self.store.openTiers)
+            let result = self.store.query(lanes: lanes, plan: plan, spans: spans)
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    /// The same read, answered inline. For the CSV export and for tests, which
+    /// need the answer where they stand; the chart uses the asynchronous form.
+    ///
+    /// Must not be called from the history queue.
+    public func query(lanes: [Int], range: HistoryRange,
+                      maxColumns: Int = HistoryColumnPlan.columnCap,
+                      at now: TimeInterval? = nil) -> HistoryQueryResult {
+        let when = now ?? self.environment.now()
+        let spans = self.sleepMonitor.spans
+        return self.queue.sync {
+            let plan = HistoryColumnPlan.plan(for: range, endingAt: when, maxColumns: maxColumns,
+                                              tiers: self.store.openTiers)
+            return self.store.query(lanes: lanes, plan: plan, spans: spans)
+        }
+    }
+
     /// The machine is going to sleep. Opens the span, commits what the
     /// accumulators hold and flushes — §3's "fsync on sleep" — then gives the
     /// timer up, because nothing will tick until the next sample after wake and
