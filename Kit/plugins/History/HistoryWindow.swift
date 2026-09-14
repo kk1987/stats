@@ -1165,6 +1165,29 @@ public final class HistoryWindow: NSWindow, NSWindowDelegate {
     }
 }
 
+// MARK: - entry points
+
+/// The expand button the module popups hang on their "Usage history"
+/// separator (§5). It is built here rather than at each call site so that the
+/// upstream popup edit stays the single added argument §9 budgets for it, and
+/// so the icon, the tooltip and the action are stated once instead of six
+/// times.
+///
+/// The button is offered whether or not recording is on: the window reads what
+/// is already stored, and a user who turned the switch off last week still has
+/// last week's history to look at.
+public func historyExpandButton(for module: ModuleType) -> NSView {
+    let button = PopupButton(
+        toolTip: localizedString("Open the usage history window"),
+        icon: "arrow.up.left.and.arrow.down.right"
+    ) {
+        HistoryWindow.shared.show(module: module)
+    }
+    // Image-only, so VoiceOver would otherwise read the SF Symbol name.
+    button.setAccessibilityLabel(localizedString("Open the usage history window"))
+    return button
+}
+
 // MARK: - content (top bar, sidebar, chart, readout table)
 
 private final class HistoryWindowContentView: NSView {

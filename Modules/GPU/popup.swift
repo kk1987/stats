@@ -103,7 +103,7 @@ internal class Popup: PopupWrapper {
     private func initChart() -> NSView  {
         let view: NSView = NSView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: self.chartHeight))
         view.heightAnchor.constraint(equalToConstant: 90 + Constants.Popup.separatorHeight).isActive = true
-        let separator = separatorView(localizedString("Usage history"), origin: NSPoint(x: 0, y: self.chartHeight-Constants.Popup.separatorHeight), width: self.frame.width)
+        let separator = separatorView(localizedString("Usage history"), origin: NSPoint(x: 0, y: self.chartHeight-Constants.Popup.separatorHeight), width: self.frame.width, button: historyExpandButton(for: .GPU))
         let container: NSView = NSView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: separator.frame.origin.y))
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.lightGray.withAlphaComponent(0.1).cgColor

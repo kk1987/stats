@@ -594,6 +594,8 @@
 "Lane" = "Lane";
 "Avg" = "Avg";
 "%0 %1–%2" = "%0 %1–%2";
+"History" = "History";
+"Open the usage history window" = "Open the usage history window";
 
 // System Stats
 "Authorization" = "Autorització"; // qwen3.8:27b
