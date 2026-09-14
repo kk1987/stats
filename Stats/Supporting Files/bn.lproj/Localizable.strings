@@ -558,6 +558,8 @@
 "Lane" = "Lane";
 "Avg" = "Avg";
 "%0 %1–%2" = "%0 %1–%2";
+"History" = "History";
+"Open the usage history window" = "Open the usage history window";
 "Battery remaining to full charge" = "সম্পূর্ণ চার্জ হতে %0% বাকি";
 "Percentage" = "শতকরা";
 "Percentage and time" = "শতকরা এবং সময়";

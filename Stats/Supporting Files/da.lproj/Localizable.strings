@@ -558,6 +558,8 @@
 "Lane" = "Lane";
 "Avg" = "Avg";
 "%0 %1–%2" = "%0 %1–%2";
+"History" = "History";
+"Open the usage history window" = "Open the usage history window";
 "Install fan helper" = "Tillad blæserkontrol";
 "Uninstall fan helper" = "Afinstaller blæserkontrol";
 "Fan value" = "Blæserværdi";

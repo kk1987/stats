@@ -31,6 +31,10 @@ class SettingsWindow: NSWindow, NSWindowDelegate, NSToolbarDelegate {
     
     private var toggleButton: NSControl? = nil
     private var activeModuleName: String? = nil
+    /// The pane the sidebar is really on. The History row is a launcher, not a
+    /// pane, so clicking it has to hand the selection back to whatever was
+    /// open — and `title` holds a localized string, not the routing key.
+    private var activePaneTitle: String = "Dashboard"
     private var settingsPreviewButton: NSView? = nil
     
     init() {
@@ -205,8 +209,23 @@ class SettingsWindow: NSWindow, NSWindowDelegate, NSToolbarDelegate {
                 self.toggleButton?.isHidden = true
                 self.settingsPreviewButton?.isHidden = true
                 NotificationCenter.default.post(name: .openWindow, object: nil, userInfo: ["state": false])
+            } else if title == "History" {
+                // History is its own window (§5), not a 540 pt settings pane,
+                // so this row opens it and leaves the sidebar selection where
+                // the user actually was. The restore has to wait for the next
+                // run loop turn: this notification is posted by the History
+                // row's own `activate()` *before* it paints its highlight, and
+                // delivery is synchronous, so restoring here would be undone a
+                // moment later and leave two rows drawn as selected.
+                HistoryWindow.shared.show()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.sidebarView.openMenu(self.activePaneTitle)
+                }
+                return
             }
             
+            self.activePaneTitle = title
             self.title = localizedString(title)
             
             self.mainView.setView(view)
@@ -311,6 +330,7 @@ private class SidebarView: NSStackView {
     
     private var dashboardIcon: NSImage { NSImage(systemSymbolName: "circle.grid.3x3.fill", accessibilityDescription: nil)! }
     private var settingsIcon: NSImage { iconFromSymbol(name: "gear", scale: .large) }
+    private var historyIcon: NSImage { iconFromSymbol(name: "clock.arrow.circlepath", scale: .large) }
     private var bugIcon: NSImage { iconFromSymbol(name: "ladybug", scale: .large) }
     private var supportIcon: NSImage { iconFromSymbol(name: "heart.fill", scale: .large) }
     private var pauseIcon: NSImage { iconFromSymbol(name: "pause.fill", scale: .large) }
@@ -332,6 +352,7 @@ private class SidebarView: NSStackView {
         
         self.scrollView.stackView.addArrangedSubview(MenuItem(icon: self.dashboardIcon, title: "Dashboard"))
         self.scrollView.stackView.addArrangedSubview(spacer)
+        self.scrollView.stackView.addArrangedSubview(MenuItem(icon: self.historyIcon, title: "History"))
         
         self.supportPopover.behavior = .transient
         self.supportPopover.contentViewController = self.supportView()
@@ -495,6 +516,8 @@ private class MenuItem: NSView {
             toolTip = localizedString("Open application settings")
         } else if title == "Dashboard" {
             toolTip = localizedString("Open dashboard")
+        } else if title == "History" {
+            toolTip = localizedString("Open the usage history window")
         } else {
             toolTip = localizedString("Open \(title) settings")
         }

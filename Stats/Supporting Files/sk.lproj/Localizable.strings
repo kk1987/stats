@@ -558,6 +558,8 @@
 "Lane" = "Lane";
 "Avg" = "Avg";
 "%0 %1–%2" = "%0 %1–%2";
+"History" = "History";
+"Open the usage history window" = "Open the usage history window";
 "Install fan helper" = "Inštalácia pomocníka pre ventilátor";
 "Uninstall fan helper" = "Odinštalácia pomocníka ventilátora";
 "Fan value" = "Otáčky ventilátora";

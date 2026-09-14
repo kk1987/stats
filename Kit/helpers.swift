@@ -399,7 +399,7 @@ public extension NSBezierPath {
     }
 }
 
-public func separatorView(_ title: String, origin: NSPoint = NSPoint(x: 0, y: 0), width: CGFloat = 0, rightInset: CGFloat = 0) -> NSView {
+public func separatorView(_ title: String, origin: NSPoint = NSPoint(x: 0, y: 0), width: CGFloat = 0, rightInset: CGFloat = 0, button: NSView? = nil) -> NSView {
     let view: NSView = NSView(frame: NSRect(x: origin.x, y: origin.y, width: width, height: 30))
     view.heightAnchor.constraint(equalToConstant: view.bounds.height).isActive = true
     
@@ -442,10 +442,27 @@ public func separatorView(_ title: String, origin: NSPoint = NSPoint(x: 0, y: 0)
         leftLine.heightAnchor.constraint(equalToConstant: 1),
         
         rightLine.leadingAnchor.constraint(equalTo: labelView.trailingAnchor, constant: gap),
-        rightLine.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -rightInset),
         rightLine.centerYAnchor.constraint(equalTo: view.centerYAnchor),
         rightLine.heightAnchor.constraint(equalToConstant: 1)
     ])
+    
+    // An optional trailing accessory, so that a frame-positioned separator can
+    // carry a button without being restructured into a `SeparatorView` stack
+    // view (which has no width constraint and would lay out at zero width in
+    // the frame-based popups). `rightInset` keeps its meaning — it is what the
+    // accessory itself is inset by — and the right line stops at the button's
+    // leading edge so the two can never overlap.
+    if let button {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(button)
+        NSLayoutConstraint.activate([
+            button.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -rightInset),
+            button.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            rightLine.trailingAnchor.constraint(equalTo: button.leadingAnchor, constant: -gap)
+        ])
+    } else {
+        rightLine.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -rightInset).isActive = true
+    }
     
     return view
 }

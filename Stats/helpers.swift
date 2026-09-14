@@ -366,6 +366,14 @@ extension AppDelegate {
         if event.modifierFlags.contains(.option) { keyCodes.append(58) }
         keyCodes.append(event.keyCode)
         
+        // ⌃⌥H opens the usage history window (§5). ⌥⌘H is Hide Others, so the
+        // control modifier is what keeps the shortcut off a system one; 59 is
+        // control, 58 is option and 4 is H, in the order built above.
+        if keyCodes == [59, 58, 4] {
+            HistoryWindow.shared.show()
+            return
+        }
+        
         guard !keyCodes.isEmpty,
               let module = modules.first(where: { $0.enabled && $0.popupKeyboardShortcut == keyCodes }),
               let widget = module.menuBar.widgets.filter({ $0.isActive }).first,

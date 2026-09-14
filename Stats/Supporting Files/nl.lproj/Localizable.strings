@@ -558,6 +558,8 @@
 "Lane" = "Lane";
 "Avg" = "Avg";
 "%0 %1–%2" = "%0 %1–%2";
+"History" = "History";
+"Open the usage history window" = "Open the usage history window";
 "Install fan helper" = "Installeer het ventilator-hulpprogramma";
 "Uninstall fan helper" = "Verwijder het ventilator-hulpprogramma.";
 "Fan value" = "Waarde van de ventilator"; // translategemma:4b

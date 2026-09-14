@@ -234,7 +234,7 @@ internal class Popup: PopupWrapper {
         view.orientation = .vertical
         view.spacing = Constants.Popup.spacing
         
-        let separator = separatorView(localizedString("Usage history"), origin: NSPoint(x: 0, y: 0), width: self.frame.width)
+        let separator = separatorView(localizedString("Usage history"), origin: NSPoint(x: 0, y: 0), width: self.frame.width, button: historyExpandButton(for: .CPU))
         
         let lineChartContainer: NSView = {
             let box: NSView = NSView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: 70))
