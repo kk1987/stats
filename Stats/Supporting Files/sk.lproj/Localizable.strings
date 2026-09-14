@@ -560,6 +560,13 @@
 "%0 %1–%2" = "%0 %1–%2";
 "History" = "History";
 "Open the usage history window" = "Open the usage history window";
+"Retention" = "Retention";
+"Minimal (24 hours)" = "Minimal (24 hours)";
+"Standard (24 hours, 30 days, 1 year)" = "Standard (24 hours, 30 days, 1 year)";
+"Reduce stored history" = "Reduce stored history";
+"Reduce stored history text" = "The 30-day and 1-year history will be permanently deleted. The last 24 hours is kept. Are you sure you want to do this?";
+"History retention could not be changed" = "The retention setting was saved and will be used the next time Stats starts recording, but the stored history could not be changed right now.";
+"History retention was only partly changed" = "The history the smaller setting discards has been deleted, but Stats could not finish the change. The retention setting was saved and is used the next time Stats starts recording.";
 "Install fan helper" = "Inštalácia pomocníka pre ventilátor";
 "Uninstall fan helper" = "Odinštalácia pomocníka ventilátora";
 "Fan value" = "Otáčky ventilátora";

@@ -195,9 +195,6 @@ public final class HistoryRecorder {
     // MARK: - state
 
     public let store: HistoryStore
-    /// Standard or Minimal, and nothing else (§3). Minimal keeps T0 only, so
-    /// the rollup below simply has no coarse tier to write.
-    public let preset: HistoryRetentionPreset
     private let environment: Environment
 
     /// The one private serial queue the feature owns. Everything that touches a
@@ -224,6 +221,14 @@ public final class HistoryRecorder {
 
     // Guarded by `lock`.
     private var recording: Bool = false
+    /// Standard or Minimal, and nothing else (§3). Minimal keeps T0 only, so
+    /// the rollup below simply has no coarse tier to write.
+    ///
+    /// Written by `setPreset` on the history queue and read from main by the
+    /// settings section, which is why it is under the lock rather than a plain
+    /// stored property. Read it as `self.preset`, never as `presetValue`, and
+    /// never from inside a `locked` block: `os_unfair_lock` is not recursive.
+    private var presetValue: HistoryRetentionPreset
     private var statusValue: HistoryStore.Status = .disabled
     /// Whether the commit timer is wanted. Flipped to `true` by the ingest that
     /// first dirties a clean table and back to `false` by a commit that leaves
@@ -250,8 +255,11 @@ public final class HistoryRecorder {
     private var lastSyncTs: TimeInterval = 0
     private var lastDirectoryWriteTs: TimeInterval = 0
 
+    /// The app's recorder, which opens whatever retention preset the user last
+    /// chose. A recorder built for a test is handed its preset explicitly, so
+    /// the suite never depends on the preference of whoever is running it.
     public convenience init() {
-        self.init(store: HistoryStore.shared)
+        self.init(store: HistoryStore.shared, preset: HistoryRecorder.retentionPreset)
     }
 
     /// The store, the preset and the environment are injected so that a test
@@ -260,7 +268,7 @@ public final class HistoryRecorder {
     public init(store: HistoryStore, preset: HistoryRetentionPreset = .standard,
                 environment: Environment = .live) {
         self.store = store
-        self.preset = preset
+        self.presetValue = preset
         self.environment = environment
         self.table = HistoryAccumulatorTable(step: HistoryTier.t0.step)
         self.sleepMonitor = HistorySleepMonitor(
@@ -316,6 +324,31 @@ public final class HistoryRecorder {
         get { Store.shared.bool(key: HistoryRecorder.settingsKey, defaultValue: true) }
         set { Store.shared.set(key: HistoryRecorder.settingsKey, value: newValue) }
     }
+
+    /// Where the retention preset is persisted. Same `Store` spelling as the
+    /// master switch beside it.
+    public static let presetSettingsKey: String = "history_preset"
+
+    /// The retention preset as the user last left it, Standard by default
+    /// (§3). This is the *preference*: `preset` below is what the running
+    /// recorder actually has open, and the two disagree only while a settings
+    /// change is in flight or when another copy of Stats holds the flock and
+    /// this one never opened anything to change.
+    ///
+    /// An unreadable or unknown stored value falls back rather than throwing:
+    /// a hand-edited preference must not be able to stop the recorder.
+    public static var retentionPreset: HistoryRetentionPreset {
+        get {
+            let stored = Store.shared.string(key: HistoryRecorder.presetSettingsKey,
+                                             defaultValue: HistoryRetentionPreset.fallback.rawValue)
+            return HistoryRetentionPreset(rawValue: stored) ?? HistoryRetentionPreset.fallback
+        }
+        set { Store.shared.set(key: HistoryRecorder.presetSettingsKey, value: newValue.rawValue) }
+    }
+
+    /// Which tiers this recorder has open. Written only by `setPreset`, on the
+    /// history queue; safe to read from anywhere.
+    public var preset: HistoryRetentionPreset { self.locked { self.presetValue } }
 
     /// Master switch, read as the first statement of `ingest`. ON by default:
     /// a retrospective feature that is off when the anomaly happens is
@@ -447,6 +480,132 @@ public final class HistoryRecorder {
         }
         guard changed, !enabled else { return }
         self.queue.async { self.commit(at: self.environment.now()) }
+    }
+
+    // MARK: - setPreset (grow: copy forward and rebuild; shrink: drop tiers)
+
+    /// What a preset change did. Three answers rather than two, because the
+    /// settings alert has to tell a user whose coarse tiers were already
+    /// unlinked something other than a user whose archives were never touched.
+    public enum PresetChange {
+        /// The archives are in the new preset's shape.
+        case applied
+        /// Nothing on disk moved: another copy of Stats holds the flock, so
+        /// this one owns none of these files.
+        case declined
+        /// A shrink that removed what the new preset no longer covers and then
+        /// failed — the file would not unlink, or reopening threw. The history
+        /// the user gave up is gone; the archives are not in a shape either
+        /// preset describes until the next start.
+        case partial
+    }
+
+    /// Switches the retention preset, on the history queue, with ingest
+    /// quiesced.
+    ///
+    /// There are exactly two transitions (§3), and this is both of them:
+    ///
+    /// *Growing* Minimal → Standard keeps T0 exactly as it is — its file is
+    /// never touched, so "copies T0 forward" costs nothing at all — and then
+    /// runs the same rollup the catch-up at open runs, over everything T0 still
+    /// retains. The new tiers therefore start with **24 h of data and nothing
+    /// before it**, which the chart draws as no-data rather than as zeros.
+    ///
+    /// *Shrinking* Standard → Minimal unlinks T1 and T2. The caller is expected
+    /// to have asked first — §6 puts a Delete-weight confirmation in front of
+    /// it, because a year of history is what goes.
+    ///
+    /// The sequencing is `deleteAll`'s, for the same reasons. Ingest is stopped
+    /// first, so nothing folds into a table whose lanes are about to be
+    /// re-pointed by a reopen. What the accumulators already hold is committed
+    /// rather than discarded — a preset change is not a delete, and a grow that
+    /// dropped the last minute of T0 would roll that hole straight into the new
+    /// tiers. The mappings come down before any file is unlinked, and nothing
+    /// is ever truncated (risk 5).
+    ///
+    /// Must not be called from the history queue.
+    @discardableResult
+    public func setPreset(_ preset: HistoryRetentionPreset) -> PresetChange {
+        var outcome: PresetChange = .applied
+        self.queue.sync {
+            let current = self.preset
+            guard current != preset else { return }
+
+            // Same gate as `deleteAll`: the tier files belong to whoever holds
+            // the flock, and a copy of Stats that lost the race must not unlink
+            // the winner's archives or rebuild into them.
+            guard self.store.holdsLock else {
+                error("history: the retention preset was not applied, the archives are not locked by this process")
+                outcome = .declined
+                return
+            }
+
+            let enabled = self.isRecording
+            self.setRecordingFlag(false)
+            // Everything the accumulators hold goes to T0 before the switch, so
+            // a grow rolls up from the freshest T0 there is.
+            let now = self.environment.now()
+            self.commit(at: now)
+            self.parkTimerForGood()
+
+            self.locked { self.presetValue = preset }
+
+            let dropped = Set(current.tiers).subtracting(preset.tiers)
+            let added = Set(preset.tiers).subtracting(current.tiers)
+            for tier in dropped.sorted(by: { $0.rawValue < $1.rawValue }) {
+                // A file that refused to go is logged, reported and then left
+                // alone: the tier is closed either way, so it costs the user
+                // disk and nothing else, and unlinking is not something to
+                // retry in a loop against a filesystem that just said no. The
+                // history it held is gone from this process regardless, which
+                // is what makes this `partial` and not `declined`.
+                if !self.store.removeTier(tier) { outcome = .partial }
+            }
+            // Scan cursors and the applied directory revision describe tiers
+            // that are about to be replaced or recreated.
+            self.lastRolledUp.removeAll()
+            self.appliedRevision = 0
+
+            do {
+                // Opens whatever the new preset adds — `reconcileDirectories`
+                // is what gives a tier created here T0's lanes — and closes
+                // whatever it no longer covers.
+                try self.store.open(preset: preset)
+                if !added.isEmpty {
+                    try self.rollUpCoarseTiers(upTo: now, rebuilding: true)
+                }
+                self.consecutiveFailures = 0
+            } catch let failure {
+                error("history: the retention preset could not be applied: \(failure)")
+                self.recordFailure(failure)
+                // A grow that threw leaves T0 exactly where it was and has
+                // taken nothing away; a shrink that threw has already unlinked
+                // a year of history, and the alert must not call that "could
+                // not be changed".
+                outcome = dropped.isEmpty ? .declined : .partial
+            }
+
+            // A preset change frees disk or claims it, but it is not a delete:
+            // `isLowOnSpace` describes the volume, and the volume is the same
+            // one it was a moment ago. It survives the switch, forced to be
+            // re-read on the very next cycle rather than at the tenth.
+            //
+            // The status has to survive with it. `deleteAll` can afford an
+            // unconditional `setStatus` because it clears `isLowOnSpace` first
+            // and comes back to empty files; here a shrink that did not free
+            // enough is the likeliest case there is, `commit` goes on returning
+            // early at `guard !self.isLowOnSpace`, and `checkFreeSpace` only
+            // touches the status when the low/not-low state actually flips — so
+            // a banner overwritten here would never come back, and the section
+            // would read "recording" for the rest of the launch while nothing
+            // was being written.
+            self.needsFreeSpaceCheck = true
+            self.setRecordingFlag(enabled)
+            if self.status != .writeFailures, self.status != .lowDiskSpace {
+                self.setStatus(enabled ? .recording : .disabled)
+            }
+        }
+        return outcome
     }
 
     // MARK: - deleteAll (quiesce, unmap, unlink, recreate)
@@ -916,16 +1075,21 @@ public final class HistoryRecorder {
     /// relaunch is still correct when it closes, and the ones that closed while
     /// the app was down are recoverable for as long as T0 retains their source
     /// rows (§3).
-    private func rollUpCoarseTiers(upTo now: TimeInterval) throws {
+    ///
+    /// `rebuilding` is the preset grow: the tier was created empty a moment
+    /// ago, so there is no cursor to carry on from and the whole of what T0
+    /// still retains is in scope.
+    private func rollUpCoarseTiers(upTo now: TimeInterval, rebuilding: Bool = false) throws {
         guard let t0 = self.store.archive(.t0), t0.laneCount > 0 else { return }
         for tier in self.preset.tiers where tier != .t0 {
             guard let archive = self.store.archive(tier) else { continue }
-            try self.rollUp(tier: tier, into: archive, from: t0, upTo: now)
+            try self.rollUp(tier: tier, into: archive, from: t0, upTo: now, rebuilding: rebuilding)
         }
     }
 
     private func rollUp(tier: HistoryTier, into archive: HistoryArchive,
-                        from t0: HistoryArchive, upTo now: TimeInterval) throws {
+                        from t0: HistoryArchive, upTo now: TimeInterval,
+                        rebuilding: Bool = false) throws {
         let lanes = archive.laneCount
         guard lanes > 0 else { return }
         let current = HistoryClock.bucketIndex(now, step: tier.step)
@@ -935,19 +1099,31 @@ public final class HistoryRecorder {
         // honest no-data: downtime longer than T0's 24 h is a hole, not a
         // fabricated flat line (§3).
         let coverage = UInt32(Swift.max(1, HistoryTier.t0.buckets * HistoryTier.t0.step / tier.step))
-        // `lastCommitBucket == 0` is a tier that has never been written: only
-        // the bucket that just closed is worth looking at, and even that is
-        // no-data unless T0 happens to hold something for it.
-        var from = archive.lastCommitBucket == 0 ? current &- 1 : archive.lastCommitBucket &+ 1
-        // A span that rolled up to nothing writes nothing, so `lastCommitBucket`
-        // does not move and the next tick would scan it again — for as long as
-        // the machine stays idle, which after a day of downtime is 720 T1 or 48
-        // T2 buckets re-read every minute. A closed coarse bucket cannot gain
-        // T0 rows after the fact (the T0 commit for its span runs first, in the
-        // same cycle), so scanning it once is enough.
-        if let scanned = self.lastRolledUp[tier], scanned &+ 1 > from { from = scanned &+ 1 }
         let earliest = current > coverage ? current - coverage : 0
-        if from < earliest { from = earliest }
+
+        var from: UInt32
+        if rebuilding {
+            // A preset grow. The tier is minutes old and empty, so the two
+            // narrowings below would both answer "one bucket" and the new tier
+            // would start with a single row instead of the day §3 promises it.
+            // Everything T0 can still source is in scope, and the pass is
+            // bounded by T0's own ring either way: 720 T1 or 48 T2 buckets.
+            from = earliest
+        } else {
+            // `lastCommitBucket == 0` is a tier that has never been written:
+            // only the bucket that just closed is worth looking at, and even
+            // that is no-data unless T0 happens to hold something for it.
+            from = archive.lastCommitBucket == 0 ? current &- 1 : archive.lastCommitBucket &+ 1
+            // A span that rolled up to nothing writes nothing, so
+            // `lastCommitBucket` does not move and the next tick would scan it
+            // again — for as long as the machine stays idle, which after a day
+            // of downtime is 720 T1 or 48 T2 buckets re-read every minute. A
+            // closed coarse bucket cannot gain T0 rows after the fact (the T0
+            // commit for its span runs first, in the same cycle), so scanning
+            // it once is enough.
+            if let scanned = self.lastRolledUp[tier], scanned &+ 1 > from { from = scanned &+ 1 }
+            if from < earliest { from = earliest }
+        }
         guard from < current else { return }
 
         var rows: [HistoryRow] = []
