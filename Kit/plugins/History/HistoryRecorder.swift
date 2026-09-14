@@ -150,6 +150,48 @@ public final class HistoryRecorder {
         )
     }
 
+    // MARK: - the test host
+
+    /// Whether this process is running an XCTest bundle.
+    ///
+    /// The `Tests` target is hosted by `Stats.app`, so running the suite
+    /// launches the real `AppDelegate` — which starts `shared`, and that alone
+    /// creates `~/Library/Application Support/Stats/history`, takes the flock
+    /// on it and lays down a year's worth of empty archives in the developer's
+    /// own Application Support, on a machine where Stats may never have been
+    /// installed. Worse, on a machine where it *is* installed and running, the
+    /// test host is then a second writer competing for that lock with the copy
+    /// in the menu bar.
+    ///
+    /// Asked here rather than in `AppDelegate` because the invariant belongs to
+    /// this object: the hook, the settings section and `Reset settings` all
+    /// reach `shared` too, and a guard at the one call site would leave every
+    /// other path free to open the user's archive from a test run. §9's budget
+    /// for `AppDelegate` also stays at the two lines it names.
+    ///
+    /// The environment variable is the reliable half: `xctest` sets it before
+    /// the host process starts, which is well before
+    /// `applicationDidFinishLaunching`. The class lookup is the fallback for a
+    /// bundle injected into a process that was already running.
+    public static let isRunningUnderTestHost: Bool = {
+        let environment = ProcessInfo.processInfo.environment
+        for key in ["XCTestConfigurationFilePath", "XCTestBundlePath", "XCTestSessionIdentifier"]
+        where environment[key] != nil {
+            return true
+        }
+        return NSClassFromString("XCTestCase") != nil
+    }()
+
+    /// Whether `start` has to refuse. The test host suppresses the *shared*
+    /// recorder — the one pointed at the user's own archive — and nothing else:
+    /// the suite's own recorders are built on a `HistoryStore` of their own at a
+    /// temporary directory, and those have to go on starting, opening and
+    /// locking exactly as they do in the app, or the tests would stop covering
+    /// the code they exist for.
+    private var isSuppressedByTheTestHost: Bool {
+        HistoryRecorder.isRunningUnderTestHost && self.store === HistoryStore.shared
+    }
+
     // MARK: - state
 
     public let store: HistoryStore
@@ -311,6 +353,13 @@ public final class HistoryRecorder {
     /// last week means zero ingest and zero writes from launch — not a recorder
     /// that records until the settings panel is first opened.
     public func start(enabled: Bool = HistoryRecorder.isEnabledInSettings) {
+        // Nothing has to be undone to stay idle: a recorder that never started
+        // is already not recording, already `.disabled`, holds no lock and has
+        // no archive open. Returning before the hop is what keeps it that way.
+        guard !self.isSuppressedByTheTestHost else {
+            debug("history: the recorder stays idle, this process is an XCTest host")
+            return
+        }
         self.queue.async { self.performStart(enabled: enabled) }
     }
 
