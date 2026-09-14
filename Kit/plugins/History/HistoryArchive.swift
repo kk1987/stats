@@ -43,15 +43,39 @@ public enum HistoryTier: Int, CaseIterable {
     }
 }
 
-/// Retention preset. Two entries only, see §3.
-public enum HistoryRetentionPreset: String {
+/// Retention preset. Two entries only, see §3: Standard is the design — a year
+/// at 10 s / 2 min / 30 min — and Minimal exists for the user who wants the
+/// live window and nothing retained, not as a second retention policy to reason
+/// about.
+public enum HistoryRetentionPreset: String, CaseIterable {
     case minimal
     case standard
+
+    /// What the user gets when nothing has been chosen yet.
+    public static let fallback: HistoryRetentionPreset = .standard
 
     public var tiers: [HistoryTier] {
         switch self {
         case .minimal: return [.t0]
         case .standard: return [.t0, .t1, .t2]
+        }
+    }
+
+    /// What the tier files would occupy at this lane count, in bytes.
+    ///
+    /// This is what the settings picker shows, and it is deliberately computed
+    /// from the *live* lane count rather than from the 256-lane ceiling: the
+    /// variable that moves the footprint is how many series the machine has
+    /// accrued, not which preset is selected (§6, risk 2). The figure is exact
+    /// rather than an estimate — the archive is preallocated, so the file is
+    /// this size from the moment it is created.
+    ///
+    /// The span sidecar and any quarantined `.corrupt-<ts>` file are not in it;
+    /// they are not a function of the preset, and the "Size on disk" row above
+    /// already measures what the directory really costs.
+    public func projectedBytes(lanes: Int) -> Int64 {
+        self.tiers.reduce(into: Int64(0)) { total, tier in
+            total += Int64(HistoryArchive.fileSize(buckets: tier.buckets, lanes: lanes))
         }
     }
 }
@@ -1279,6 +1303,55 @@ public final class HistoryStore {
     public func drop(_ tier: HistoryTier) {
         guard let archive = self.archives.removeValue(forKey: tier) else { return }
         archive.close()
+    }
+
+    /// Forgets a tier *and* unlinks its file, for a retention preset that no
+    /// longer covers it.
+    ///
+    /// `drop` alone would leave a 20–400 MB file behind that nothing ever reads
+    /// again, which is the opposite of what shrinking the preset is for. The
+    /// order is `deleteAll`'s: `drop` closes the archive, so the `mmap` is gone
+    /// before the file it maps is unlinked, and the file is removed whole —
+    /// never truncated under a live mapping (§3, risk 5).
+    ///
+    /// A missing file is a success: the tier is gone either way, and a preset
+    /// that was already Minimal at the last launch leaves no `t1.rrd` to unlink.
+    ///
+    /// History queue only.
+    @discardableResult
+    public func removeTier(_ tier: HistoryTier) -> Bool {
+        self.drop(tier)
+
+        // Everything that belongs to the tier, not only `t<n>.rrd`. A `kill -9`
+        // in the middle of a lane-growth rebuild leaves a full-size
+        // `t1.rrd.rebuild` beside it, and a header that failed its CRC leaves
+        // one `t1.rrd.corrupt-<ts>`; both are swept by `open()`, which a preset
+        // that no longer covers the tier never calls again. Leaving them would
+        // keep exactly the disk the shrink was asked to give back, inside the
+        // directory §3 declares its ceiling over.
+        let manager = FileManager.default
+        var names = [tier.fileName]
+        do {
+            names = try manager.contentsOfDirectory(atPath: self.directory.path)
+                .filter { $0 == tier.fileName || $0.hasPrefix("\(tier.fileName).") }
+        } catch let failure {
+            // Not a failure of its own: the one file whose name is known is
+            // still worth unlinking, and it is the one that carries the size.
+            error("history: the directory could not be listed to remove \(tier.fileName): \(failure)")
+        }
+
+        var ok = true
+        for name in names {
+            do {
+                try manager.removeItem(at: self.directory.appendingPathComponent(name))
+            } catch let failure {
+                let reason = failure as NSError
+                if reason.domain == NSCocoaErrorDomain && reason.code == NSFileNoSuchFileError { continue }
+                error("history: \(name) could not be removed: \(failure)")
+                ok = false
+            }
+        }
+        return ok
     }
 
     public func closeAll() {

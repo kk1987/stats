@@ -1345,6 +1345,190 @@ final class HistoryTests: XCTestCase {
         XCTAssertFalse(contents.contains(HistoryTier.t2.fileName))
     }
 
+    /// Growing Minimal → Standard copies T0 forward — its file is not touched
+    /// at all — and then runs the catch-up rollup over everything T0 still
+    /// retains, so T1 and T2 start with 24 h of data and honest no-data before
+    /// it (§3).
+    ///
+    /// The rollup this exercises is the one the catch-up at open uses, with the
+    /// one difference the grow needs: a tier created a moment ago has no
+    /// `lastCommitBucket` to carry on from, so without the rebuild flag both
+    /// new tiers would start with the single bucket that just closed.
+    func testGrowingToStandardRebuildsTheCoarseTiersFromT0() throws {
+        let probe = try self.probe(preset: .minimal)
+        defer { probe.recorder.stop() }
+
+        // Two hours of samples, one a minute: enough to close sixty T1 buckets
+        // and four T2 ones, so the rebuild has something to find at both.
+        for i in 0..<120 { probe.ingest(Double(i % 10)) }
+        XCTAssertNil(probe.store.archive(.t1))
+
+        XCTAssertEqual(probe.recorder.setPreset(.standard), .applied)
+        XCTAssertEqual(probe.recorder.preset, .standard)
+        XCTAssertEqual(probe.store.openTiers, [.t0, .t1, .t2])
+
+        let contents = try FileManager.default.contentsOfDirectory(atPath: probe.store.directory.path)
+        XCTAssertTrue(contents.contains(HistoryTier.t1.fileName))
+        XCTAssertTrue(contents.contains(HistoryTier.t2.fileName))
+
+        // T0 is carried forward untouched: the same sample is still where it
+        // was written, at the same bucket, with the same count.
+        let t0 = try XCTUnwrap(probe.store.archive(.t0))
+        let sampled = probe.start + 600
+        XCTAssertEqual(t0.slot(bucket: HistoryClock.bucketIndex(sampled, step: HistoryTier.t0.step),
+                               lane: 0)?.count, 1)
+
+        // The new tiers carry T0's lanes — that is what `reconcileDirectories`
+        // is for — and hold the whole two hours rather than the one bucket that
+        // closed while the preset was being changed.
+        let t1 = try XCTUnwrap(probe.store.archive(.t1))
+        let t2 = try XCTUnwrap(probe.store.archive(.t2))
+        XCTAssertEqual(t1.laneCount, t0.laneCount)
+        XCTAssertEqual(t2.laneCount, t0.laneCount)
+
+        let t1Bucket = HistoryClock.bucketIndex(sampled, step: HistoryTier.t1.step)
+        let t2Bucket = HistoryClock.bucketIndex(sampled, step: HistoryTier.t2.step)
+        XCTAssertGreaterThan(try XCTUnwrap(t1.slot(bucket: t1Bucket, lane: 0)).count, 0)
+        XCTAssertGreaterThan(try XCTUnwrap(t2.slot(bucket: t2Bucket, lane: 0)).count, 0)
+
+        // And nothing was invented before the data starts: a bucket ten minutes
+        // earlier than the first sample reads as no-data rather than as a zero.
+        XCTAssertNil(t1.slot(bucket: HistoryClock.bucketIndex(probe.start - 600, step: HistoryTier.t1.step),
+                             lane: 0))
+
+        // The recorder comes back recording into its new shape.
+        XCTAssertEqual(probe.recorder.status, .recording)
+        let next = HistoryClock.bucketIndex(probe.now, step: HistoryTier.t0.step)
+        probe.ingest(42)
+        XCTAssertEqual(t0.slot(bucket: next, lane: 0)?.max, 42)
+    }
+
+    /// Shrinking Standard → Minimal discards T1 and T2 — the settings picker
+    /// puts a Delete-weight confirmation in front of it for exactly that reason
+    /// (§6) — and keeps T0, which is the whole of what Minimal retains.
+    ///
+    /// The files are unlinked rather than left behind: a `t2.rrd` nothing ever
+    /// reads again would cost the user the disk the smaller preset was chosen
+    /// to save. Nothing is truncated, and the mappings come down first.
+    func testShrinkingToMinimalDropsTheCoarseTiersAndKeepsT0() throws {
+        let probe = try self.probe(preset: .standard)
+        defer { probe.recorder.stop() }
+
+        for i in 0..<120 { probe.ingest(Double(i % 10)) }
+        XCTAssertGreaterThan(try XCTUnwrap(probe.store.archive(.t1)).lastCommitBucket, 0)
+
+        var contents = try FileManager.default.contentsOfDirectory(atPath: probe.store.directory.path)
+        XCTAssertTrue(contents.contains(HistoryTier.t1.fileName))
+        XCTAssertTrue(contents.contains(HistoryTier.t2.fileName))
+
+        // What a `kill -9` during a lane-growth rebuild leaves behind. It is
+        // full-size and it is swept only when its tier is next opened, which a
+        // preset that dropped the tier never does — so the shrink has to take
+        // it, or the disk the user asked for back is still spent.
+        let orphan = probe.store.directory.appendingPathComponent("\(HistoryTier.t1.fileName).rebuild")
+        try Data([0]).write(to: orphan)
+
+        XCTAssertEqual(probe.recorder.setPreset(.minimal), .applied)
+        XCTAssertEqual(probe.recorder.preset, .minimal)
+        XCTAssertEqual(probe.store.openTiers, [.t0])
+        XCTAssertNil(probe.store.archive(.t1))
+        XCTAssertNil(probe.store.archive(.t2))
+
+        contents = try FileManager.default.contentsOfDirectory(atPath: probe.store.directory.path)
+        XCTAssertTrue(contents.contains(HistoryTier.t0.fileName))
+        XCTAssertFalse(contents.contains(HistoryTier.t1.fileName))
+        XCTAssertFalse(contents.contains(HistoryTier.t2.fileName))
+        XCTAssertFalse(contents.contains(orphan.lastPathComponent))
+
+        // T0 survives with its lanes and its data, and goes on recording.
+        let t0 = try XCTUnwrap(probe.store.archive(.t0))
+        XCTAssertEqual(probe.recorder.laneCount, 1)
+        XCTAssertEqual(t0.slot(bucket: HistoryClock.bucketIndex(probe.start + 600, step: HistoryTier.t0.step),
+                               lane: 0)?.count, 1)
+        XCTAssertEqual(probe.recorder.status, .recording)
+
+        let next = HistoryClock.bucketIndex(probe.now, step: HistoryTier.t0.step)
+        probe.ingest(42)
+        XCTAssertEqual(t0.slot(bucket: next, lane: 0)?.max, 42)
+    }
+
+    /// A full volume is the state the user is likeliest to reach for the picker
+    /// in — shrinking is the obvious thing to try when the section says Stats
+    /// is out of room — and the picker stays enabled there, so the switch has
+    /// to leave the banner alone.
+    ///
+    /// Nothing else would ever put it back. `commit` returns early for as long
+    /// as `isLowOnSpace` holds, and `checkFreeSpace` touches the status only
+    /// when the low/not-low state flips, so a status overwritten here would
+    /// read "recording" for the rest of the launch while not a byte was
+    /// written. The shrink itself is not a free-space event: it gives back the
+    /// coarse tiers, which on a volume this full is not necessarily enough.
+    func testAPresetChangeOnAFullVolumeKeepsTheLowDiskSpaceBanner() throws {
+        let probe = try self.probe(preset: .standard)
+        defer { probe.recorder.stop() }
+
+        probe.ingest(5)
+        probe.freeSpace = HistoryStore.freeSpaceFloor - 1
+        // The precondition is read every tenth commit; this is the cycle that
+        // reads it and finds the volume full.
+        for _ in 0..<HistoryRecorder.freeSpaceEveryNthCommit { probe.ingest(6) }
+        XCTAssertEqual(probe.recorder.status, .lowDiskSpace)
+
+        // The shrink goes through — that is what leaving the picker enabled is
+        // for — and the volume is still full afterwards.
+        XCTAssertEqual(probe.recorder.setPreset(.minimal), .applied)
+        XCTAssertEqual(probe.recorder.preset, .minimal)
+        XCTAssertEqual(probe.recorder.status, .lowDiskSpace)
+
+        probe.advance(HistoryRecorder.commitInterval)
+        probe.recorder.commitNow()
+        XCTAssertEqual(probe.recorder.status, .lowDiskSpace)
+
+        // And the banner still clears itself the moment there is room again,
+        // which is the flip `checkFreeSpace` is waiting for.
+        probe.freeSpace = HistoryStore.freeSpaceFloor
+        let recovered = probe.now
+        probe.ingest(7)
+        XCTAssertEqual(probe.recorder.status, .recording)
+
+        let t0 = try XCTUnwrap(probe.store.archive(.t0))
+        XCTAssertEqual(t0.slot(bucket: HistoryClock.bucketIndex(recovered, step: HistoryTier.t0.step),
+                               lane: 0)?.max, 7)
+    }
+
+    /// The picker's figures come from the live lane count, not from a ceiling
+    /// (§6), and they are the whole tier file rather than its matrix: §3's
+    /// per-lane and MB tables count only the matrix, so every figure here sits
+    /// a little above the doc's — one 4 KiB header and one 128 B directory
+    /// entry per lane per tier — and that gap is what the readout beside it
+    /// measures for real.
+    func testTheProjectedSizeIsTheWholeArchiveAtTheGivenLaneCount() {
+        // 8,640 slots a lane at Minimal; 47,760 at Standard (§3).
+        XCTAssertEqual(HistoryRetentionPreset.minimal.projectedBytes(lanes: 1), 4_096 + 128 + 8_640 * 20)
+        XCTAssertEqual(HistoryRetentionPreset.standard.projectedBytes(lanes: 1),
+                       3 * (4_096 + 128) + 47_760 * 20)
+
+        // §3's MB table, which is what the settings row is checked against by
+        // hand: ~20 MB at first launch, 43 MB a month in, 244.5 MB at the cap.
+        let mb = 1_000_000.0
+        XCTAssertEqual(Double(HistoryRetentionPreset.standard.projectedBytes(lanes: 21)) / mb, 20.1, accuracy: 0.1)
+        XCTAssertEqual(Double(HistoryRetentionPreset.standard.projectedBytes(lanes: 45)) / mb, 43.0, accuracy: 0.1)
+        XCTAssertEqual(
+            Double(HistoryRetentionPreset.standard.projectedBytes(lanes: HistoryLaneDirectory.laneCap)) / mb,
+            244.5, accuracy: 0.2
+        )
+        // The worst case anyone can reach stays inside §3's 256 MiB budget.
+        XCTAssertLessThan(HistoryRetentionPreset.standard.projectedBytes(lanes: HistoryLaneDirectory.laneCap),
+                          256 * 1_024 * 1_024)
+
+        // Minimal is the cheaper of the two at every lane count, which is the
+        // one thing about the pair the user has to be able to rely on.
+        for lanes in [0, 1, 21, 45, 116, HistoryLaneDirectory.laneCap] {
+            XCTAssertLessThan(HistoryRetentionPreset.minimal.projectedBytes(lanes: lanes),
+                              HistoryRetentionPreset.standard.projectedBytes(lanes: lanes))
+        }
+    }
+
     /// A stop/start cycle has to leave a recorder that still commits on its own.
     ///
     /// The timer is wanted by the ingest that dirties a clean table and given up
