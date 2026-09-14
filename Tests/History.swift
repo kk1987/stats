@@ -2193,6 +2193,263 @@ final class HistoryTests: XCTestCase {
         return probe
     }
 
+    // MARK: - column plan and the read-side query
+    //
+    // Range to tier and to drawn columns; the count-weighted resampling the
+    // slot's `sum` + `count` exists for; and the gap columns the chart hatches
+    // instead of interpolating across.
+
+    /// §3 fixes the column counts — 360 at 10 s for 1 h, 720 at 30 s for 6 h,
+    /// 720 at 2 min for 24 h, 504 at 20 min for 7 d, 1,440 at 30 min for 30 d,
+    /// 1,460 at 6 h for 1 y — and the reason: a column that is a whole number
+    /// of buckets wide keeps the min/max envelope from stuttering at exactly
+    /// the ranges users stare at. Both halves are asserted, for every range.
+    func testEachRangeReadsFromTheTierAndColumnCountTheDesignStates() throws {
+        let now: TimeInterval = 1_700_000_000
+        let expected: [(range: HistoryRange, tier: HistoryTier, columns: Int, seconds: Int)] = [
+            (.hour, .t0, 360, 10),
+            (.sixHours, .t0, 720, 30),
+            (.day, .t1, 720, 120),
+            (.week, .t1, 504, 1_200),
+            (.month, .t2, 1_440, 1_800),
+            (.year, .t2, 1_460, 21_600)
+        ]
+
+        for row in expected {
+            let plan = HistoryColumnPlan.plan(for: row.range, endingAt: now)
+            XCTAssertEqual(plan.tier, row.tier, "\(row.range)")
+            XCTAssertEqual(plan.columns, row.columns, "\(row.range)")
+            XCTAssertEqual(plan.columnSeconds, row.seconds, "\(row.range)")
+
+            // The coarsest tier is finer than one column, every column is a
+            // whole number of buckets, and the columns cover the range exactly.
+            XCTAssertLessThanOrEqual(plan.tier.step, plan.columnSeconds, "\(row.range)")
+            XCTAssertEqual(plan.buckets.count % plan.bucketsPerColumn, 0, "\(row.range)")
+            XCTAssertEqual(plan.columns * plan.columnSeconds, row.range.seconds, "\(row.range)")
+            // And the tier retains every bucket the range asks it for.
+            XCTAssertLessThanOrEqual(plan.buckets.count, plan.tier.buckets, "\(row.range)")
+            XCTAssertEqual(plan.retainedColumns, plan.columns, "\(row.range)")
+
+            // Time-indexed: a column's position is its timestamp.
+            XCTAssertEqual(plan.columnStart(0), plan.start, "\(row.range)")
+            XCTAssertEqual(plan.column(at: plan.start), 0, "\(row.range)")
+            XCTAssertEqual(plan.column(at: plan.end - 1), plan.columns - 1, "\(row.range)")
+            XCTAssertNil(plan.column(at: plan.end), "\(row.range)")
+        }
+    }
+
+    /// A column narrower than a pixel is work nobody can see, so the chart's
+    /// width caps the count — by widening the column a whole factor, never a
+    /// fraction, so it stays a whole number of buckets.
+    func testANarrowChartWidensTheColumnByAWholeNumberOfBuckets() throws {
+        let now: TimeInterval = 1_700_000_000
+
+        let narrow = HistoryColumnPlan.plan(for: .month, endingAt: now, maxColumns: 400)
+        XCTAssertEqual(narrow.tier, .t2)
+        XCTAssertEqual(narrow.bucketsPerColumn, 4)
+        XCTAssertEqual(narrow.columns, 360)
+        XCTAssertLessThanOrEqual(narrow.columns, 400)
+        XCTAssertEqual(narrow.buckets.count % narrow.bucketsPerColumn, 0)
+        XCTAssertEqual(narrow.columns * narrow.columnSeconds, HistoryRange.month.seconds)
+
+        // The degenerate width still produces a plan rather than a division by
+        // zero: one column holding the whole range.
+        let sliver = HistoryColumnPlan.plan(for: .month, endingAt: now, maxColumns: 1)
+        XCTAssertEqual(sliver.columns, 1)
+        XCTAssertEqual(sliver.columnSeconds, HistoryRange.month.seconds)
+    }
+
+    /// The Minimal preset has only T0 open. A day still reads — twelve 10 s
+    /// buckets per 2-minute column — and a month reads what T0's ring can still
+    /// hold, saying so rather than striding a quarter of a million cells to
+    /// discover that the rest is gone.
+    func testTheMinimalPresetFallsBackToT0AndSaysWhatItCannotHold() throws {
+        let now: TimeInterval = 1_700_000_000
+
+        let day = HistoryColumnPlan.plan(for: .day, endingAt: now, tiers: [.t0])
+        XCTAssertEqual(day.tier, .t0)
+        XCTAssertEqual(day.bucketsPerColumn, 12)
+        XCTAssertEqual(day.columns, 720)
+        XCTAssertEqual(day.retainedColumns, 720)
+
+        let month = HistoryColumnPlan.plan(for: .month, endingAt: now, tiers: [.t0])
+        XCTAssertEqual(month.tier, .t0)
+        XCTAssertEqual(month.bucketsPerColumn, 180)
+        XCTAssertEqual(month.columns, 1_440)
+        // 24 h of a 30-day range: 8,640 T0 buckets, 48 columns, ending where
+        // the range ends.
+        XCTAssertEqual(month.retainedColumns, 48)
+        XCTAssertEqual(month.retainedBuckets.count, HistoryTier.t0.buckets)
+        XCTAssertEqual(month.retainedBuckets.upperBound, month.buckets.upperBound)
+    }
+
+    /// Count-weighted, like the rollup and for the same reason: bucket
+    /// population is not constant, so one sample at 100 must not outvote nine
+    /// at 10. A held bucket keeps its own reason so the chart can dash it.
+    func testColumnsAreCountWeightedAndKeepHeldSpansApart() throws {
+        let first: UInt32 = 1_000
+        let slots: [HistorySlot?] = [
+            HistorySlot(bucket: first, count: 1, reason: .measured, min: 100, max: 100, sum: 100),
+            HistorySlot(bucket: first + 1, count: 9, reason: .measured, min: 10, max: 10, sum: 90),
+            nil,
+            nil,
+            HistorySlot(bucket: first + 4, count: 1, reason: .held, min: 50, max: 50, sum: 50),
+            nil
+        ]
+        let resolver = HistoryGapResolver(step: HistoryTier.t0.step, firstValidBucket: first,
+                                          lastCommitBucket: first + 5, spans: [])
+
+        let columns = HistoryAggregate.columns(slots, from: first, bucketsPerColumn: 2, resolver: resolver)
+        XCTAssertEqual(columns.count, 3)
+
+        let measured = try XCTUnwrap(columns[0])
+        XCTAssertEqual(measured.avg, 19)
+        XCTAssertEqual(measured.min, 10)
+        XCTAssertEqual(measured.max, 100)
+        XCTAssertEqual(measured.count, 10)
+        XCTAssertEqual(measured.reason, .measured)
+
+        // Nothing at all to say: not a measured zero, and not a hatch either.
+        XCTAssertNil(columns[1])
+
+        let held = try XCTUnwrap(columns[2])
+        XCTAssertEqual(held.reason, .held)
+        XCTAssertEqual(held.avg, 50)
+        XCTAssertEqual(held.count, 1)
+
+        // A trailing partial column is not drawn: the plan always hands over a
+        // whole number of columns, and half a column of buckets would be a
+        // column an eleventh as wide as its neighbours.
+        XCTAssertEqual(HistoryAggregate.columns(slots, from: first, bucketsPerColumn: 4,
+                                                resolver: resolver).count, 1)
+        XCTAssertEqual(HistoryAggregate.columns([], from: first, bucketsPerColumn: 2, resolver: nil).count, 0)
+    }
+
+    /// A gap column carries the reason and no value. That is what the chart
+    /// hatches at 45° and the readout turns into "Asleep 02:14-08:31"; a value
+    /// interpolated across it would be the one thing §4 forbids.
+    func testGapColumnsCarryTheirReasonAndNeverAValue() throws {
+        let step = HistoryTier.t0.step
+        let first: UInt32 = 1_000
+        let slots: [HistorySlot?] = [
+            HistorySlot(bucket: first, count: 4, reason: .measured, min: 1, max: 9, sum: 20),
+            HistorySlot(bucket: first + 1, count: 4, reason: .measured, min: 2, max: 8, sum: 20),
+            nil, nil,   // asleep
+            nil, nil,   // running, but nothing recorded
+            nil, nil    // past the last commit
+        ]
+        let asleep = HistoryGapSpan(from: UInt64(first + 2) * UInt64(step),
+                                    to: UInt64(first + 4) * UInt64(step), reason: .asleep)
+        let resolver = HistoryGapResolver(step: step, firstValidBucket: first,
+                                          lastCommitBucket: first + 5, spans: [asleep])
+
+        let columns = HistoryAggregate.columns(slots, from: first, bucketsPerColumn: 2, resolver: resolver)
+        XCTAssertEqual(columns.count, 4)
+
+        let data = try XCTUnwrap(columns[0])
+        XCTAssertEqual(data.min, 1)
+        XCTAssertEqual(data.max, 9)
+        XCTAssertEqual(data.count, 8)
+
+        let sleeping = try XCTUnwrap(columns[1])
+        XCTAssertEqual(sleeping.reason, .asleep)
+        XCTAssertEqual(sleeping.count, 0)
+        XCTAssertEqual(sleeping.min, 0)
+        XCTAssertEqual(sleeping.max, 0)
+
+        // Running and recording, with nothing to show for those twenty seconds:
+        // §2 collapses a disabled module, a paused app and a reader that
+        // stopped answering to no-data rather than guessing between them.
+        XCTAssertNil(columns[2])
+
+        let down = try XCTUnwrap(columns[3])
+        XCTAssertEqual(down.reason, .notRunning)
+        XCTAssertEqual(down.count, 0)
+
+        // Before the lane existed, no span makes the emptiness more specific.
+        let fresh = HistoryGapResolver(step: step, firstValidBucket: HistoryLaneEntry.noValidBucket,
+                                       lastCommitBucket: first + 5, spans: [asleep])
+        let nothing = HistoryAggregate.columns([HistorySlot?](repeating: nil, count: 8), from: first,
+                                               bucketsPerColumn: 2, resolver: fresh)
+        XCTAssertEqual(nothing.compactMap { $0 }.count, 0)
+    }
+
+    /// The read path end to end: a plan, a mapped tier file and the columns the
+    /// chart is handed — never the decoded series (§7).
+    func testTheStoreReadsARangeAsColumns() throws {
+        let now: TimeInterval = 1_700_000_000
+        let store = HistoryStore(directory: self.folder)
+        defer { store.closeAll() }
+        _ = try store.open(preset: .standard)
+
+        let archive = try XCTUnwrap(store.archive(.t0))
+        try archive.setDirectory(Self.entries(2))
+
+        let plan = HistoryColumnPlan.plan(for: .hour, endingAt: now)
+        XCTAssertEqual(plan.columns, 360)
+
+        // The last ten buckets of the range, one column each.
+        let firstWritten = plan.buckets.upperBound - 10
+        try archive.commit((0..<10).map { Self.row(firstWritten + UInt32($0), lanes: 2, base: Float($0)) })
+
+        let lane = try XCTUnwrap(store.columns(lane: 0, plan: plan, spans: []))
+        XCTAssertEqual(lane.lane, 0)
+        XCTAssertEqual(lane.entry.label, "lane 0")
+        XCTAssertEqual(lane.columns.count, plan.columns)
+        XCTAssertEqual(lane.columns.compactMap { $0 }.count, 10)
+        XCTAssertNil(lane.columns[0])
+        XCTAssertEqual(lane.columns[plan.columns - 10]?.avg, 0)
+        XCTAssertEqual(lane.columns[plan.columns - 1]?.avg, 9)
+
+        let summary = try XCTUnwrap(lane.summary)
+        XCTAssertEqual(summary.min, 0)
+        XCTAssertEqual(summary.max, 9)
+        XCTAssertEqual(summary.count, 10)
+
+        // The second lane is its own series, offset by one, and a lane the
+        // directory does not hold is not invented.
+        let second = try XCTUnwrap(store.columns(lane: 1, plan: plan, spans: []))
+        XCTAssertEqual(second.summary?.max, 10)
+        XCTAssertNil(store.columns(lane: 7, plan: plan, spans: []))
+
+        let result = store.query(lanes: [0, 1, 7], plan: plan, spans: [])
+        XCTAssertEqual(result.lanes.count, 2)
+        XCTAssertEqual(result.plan, plan)
+    }
+
+    /// Every unit reads the way its module reads, and none of them trap on a
+    /// value the read path is willing to hand them.
+    ///
+    /// `Int(_: Double)` is a trap rather than an exception, a `Float` reaches
+    /// 3.4e38 and `Int.max` is 9.2e18, so `isFinite` alone is not a guard.
+    /// Nothing upstream narrows it either: a slot is validated by its 4-byte
+    /// bucket stamp, which says nothing about the value behind it, and
+    /// `HistoryAggregate.rollup` checks `isFinite` and no magnitude. 2,000 rpm
+    /// is `0x44FA0000`; flipping the top exponent bit makes it a finite
+    /// 1.04e37, which the archive accepts and the axis then has to label — the
+    /// same input class the bit-flip fuzz loop asserts no trap for.
+    func testEveryUnitFormatsAHugeFiniteValueWithoutTrapping() throws {
+        let flipped = Float(bitPattern: 0x7CFA_0000)
+        XCTAssertTrue(flipped.isFinite)
+
+        let units: [HistoryLaneUnit] = [.percent, .bytesPerSec, .bytes, .celsius, .watts, .volts, .rpm]
+        for unit in units {
+            for value: Float in [flipped, -flipped, .greatestFiniteMagnitude, -.greatestFiniteMagnitude] {
+                XCTAssertFalse(unit.format(value).isEmpty, "\(unit) \(value)")
+            }
+            XCTAssertEqual(unit.format(.nan), "—", "\(unit)")
+            XCTAssertEqual(unit.format(.infinity), "—", "\(unit)")
+        }
+
+        // Percent lanes store a fraction of 1 and are scaled in the formatter
+        // and only there; the three sensor units follow `Sensor_p`.
+        XCTAssertEqual(HistoryLaneUnit.percent.format(0.2), "20%")
+        XCTAssertEqual(HistoryLaneUnit.rpm.format(2_000), "2000 RPM")
+        XCTAssertEqual(HistoryLaneUnit.watts.format(12.5), "12.50 W")
+        XCTAssertEqual(HistoryLaneUnit.watts.format(120), "120 W")
+        XCTAssertEqual(HistoryLaneUnit.volts.format(11.25), "11.250 V")
+    }
+
     // MARK: - layout
     //
     // The slot and directory geometry is a format decision, not an

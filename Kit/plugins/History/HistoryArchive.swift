@@ -1320,6 +1320,46 @@ public final class HistoryStore {
         }
     }
 
+    // MARK: - read (columns for the chart)
+
+    /// One lane of a range, already resampled into drawn columns.
+    ///
+    /// This is the whole read side of the feature and it deliberately hands
+    /// back columns rather than slots: §7 budgets the open window at
+    /// +< 300 KiB *range-independent*, which only holds if the decoded series
+    /// never leaves this method. A 1-year read maps 17,520 T2 rows and returns
+    /// 1,460 columns; a 1-hour read maps 360 T0 rows and returns 360. The
+    /// mapping is read-only and file-backed, so the pages it touches are clean
+    /// and the kernel may evict them at any time (§3).
+    ///
+    /// History queue only: it reaches into the archives, which belong to it.
+    public func columns(lane: Int, plan: HistoryColumnPlan, spans: [HistoryGapSpan] = []) -> HistoryLaneColumns? {
+        guard let archive = self.archives[plan.tier], let entry = archive.entry(lane: lane) else { return nil }
+
+        // Only the part of the range the ring can still hold is read; anything
+        // older is provably gone and comes back as no-data columns without a
+        // page being touched for it (§3, the Minimal preset on a long range).
+        let readable = plan.retainedBuckets
+        let head = plan.columns - plan.retainedColumns
+        let resolver = HistoryGapResolver(step: plan.tier.step, firstValidBucket: entry.firstValidBucket,
+                                          lastCommitBucket: archive.lastCommitBucket, spans: spans)
+        let slots = archive.series(lane: lane, buckets: readable)
+        var columns = [HistoryColumn?](repeating: nil, count: head)
+        columns.append(contentsOf: HistoryAggregate.columns(slots, from: readable.lowerBound,
+                                                            bucketsPerColumn: plan.bucketsPerColumn,
+                                                            resolver: resolver))
+        return HistoryLaneColumns(lane: lane, entry: entry, columns: columns)
+    }
+
+    /// Every lane of one range, in the order asked for. Lanes the directory no
+    /// longer holds are dropped rather than faked: a lane id that outlived its
+    /// archive names another series now, and drawing it would be a lie.
+    ///
+    /// History queue only.
+    public func query(lanes: [Int], plan: HistoryColumnPlan, spans: [HistoryGapSpan] = []) -> HistoryQueryResult {
+        HistoryQueryResult(plan: plan, lanes: lanes.compactMap { self.columns(lane: $0, plan: plan, spans: spans) })
+    }
+
     // MARK: - status and size readout (lane count, bytes on disk)
 
     /// What the settings row puts next to the lane count (§6). Blocks on the
