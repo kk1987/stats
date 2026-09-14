@@ -165,6 +165,13 @@ internal class Popup: PopupWrapper {
             }
         }
         
+        // Sensors has no "Usage history" section of its own — it groups by
+        // sensor type — so the history expand button rides the first group
+        // that actually renders, whichever type that turns out to be. It is
+        // built at that point rather than here, because every type can be
+        // filtered out (nothing in the popup, or fans only) and then there is
+        // no separator to hang it on.
+        var expandButtonPlaced: Bool = false
         types.forEach { (typ: SensorType) in
             var filtered = sensors.filter{ $0.type == typ }
             var groups: [SensorGroup] = []
@@ -178,7 +185,9 @@ internal class Popup: PopupWrapper {
             filtered = filtered.filter{ $0.popupState }
             if filtered.isEmpty { return }
             
-            self.addArrangedSubview(separatorView(localizedString(typ.rawValue), width: self.frame.width))
+            let expandButton: NSView? = expandButtonPlaced ? nil : historyExpandButton(for: .sensors)
+            expandButtonPlaced = true
+            self.addArrangedSubview(separatorView(localizedString(typ.rawValue), width: self.frame.width, button: expandButton))
             groups.forEach { (group: SensorGroup) in
                 filtered.filter{ $0.group == group }.forEach { (s: Sensor_p) in
                     let history = self.chartHistory[s.key] ?? LineChartData(capacity: 120)

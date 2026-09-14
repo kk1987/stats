@@ -191,7 +191,7 @@ internal class Popup: PopupWrapper {
         let view = NSStackView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: 0))
         view.orientation = .vertical
         view.spacing = 0
-        view.addArrangedSubview(SeparatorView(label: localizedString("Usage history")))
+        view.addArrangedSubview(SeparatorView(label: localizedString("Usage history"), button: historyExpandButton(for: .battery)))
         
         let chart = BatteryChartView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: 90), history: self.chartHistory)
         chart.layer?.backgroundColor = NSColor.lightGray.withAlphaComponent(0.1).cgColor
