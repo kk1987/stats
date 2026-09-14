@@ -835,3 +835,269 @@ public enum HistoryAggregate {
         count > UInt32(UInt16.max) ? UInt16.max : UInt16(count)
     }
 }
+
+// MARK: - column plan
+
+/// Which tier a range is read from, how wide a drawn column is, and which
+/// buckets it covers.
+///
+/// §3 fixes the column counts — 360 at 10 s for 1 h, 720 at 30 s for 6 h, 720
+/// at 2 min for 24 h, 504 at 20 min for 7 d, 1,440 at 30 min for 30 d, 1,460 at
+/// 6 h for 1 y — and gives the reason: a column that is an integer number of
+/// buckets wide keeps the min/max envelope from stuttering at exactly the
+/// ranges users stare at, because every column then aggregates the same number
+/// of buckets. The table below is those numbers expressed as the two properties
+/// they are derived from, so that the invariant survives a width cap as well.
+public struct HistoryColumnPlan: Equatable {
+    /// The widest plan §7's memory budget has to carry: 1,460 columns × 16 B ×
+    /// visible lanes is 182 KiB at eight lanes, inside the +< 300 KiB the
+    /// window is budgeted. It is the 1 y range that sets it rather than the
+    /// 30 d one, because 17,520 T2 buckets divide by 12 and not by 12.17.
+    public static let columnCap: Int = 1_460
+
+    public let range: HistoryRange
+    public let tier: HistoryTier
+    /// Half-open, in the tier's own bucket index space, oldest first.
+    public let buckets: Range<UInt32>
+    /// Exact: `buckets.count` is always a multiple of it.
+    public let bucketsPerColumn: Int
+
+    public init(range: HistoryRange, tier: HistoryTier, buckets: Range<UInt32>, bucketsPerColumn: Int) {
+        self.range = range
+        self.tier = tier
+        self.buckets = buckets
+        self.bucketsPerColumn = Swift.max(1, bucketsPerColumn)
+    }
+
+    public var columns: Int { self.buckets.count / self.bucketsPerColumn }
+    /// Wall-clock seconds one column covers.
+    public var columnSeconds: Int { self.tier.step * self.bucketsPerColumn }
+    public var start: TimeInterval { HistoryClock.bucketStart(self.buckets.lowerBound, step: self.tier.step) }
+    public var end: TimeInterval { HistoryClock.bucketStart(self.buckets.upperBound, step: self.tier.step) }
+
+    /// The wall-clock second a column starts at. The x axis is drawn from this
+    /// and from nothing else: the chart is time-indexed, so a column's position
+    /// is its timestamp and never its index in an array (§5).
+    public func columnStart(_ column: Int) -> TimeInterval {
+        HistoryClock.bucketStart(self.buckets.lowerBound &+ UInt32(column * self.bucketsPerColumn),
+                                 step: self.tier.step)
+    }
+
+    /// The column a wall-clock second falls in, or `nil` outside the plan.
+    public func column(at ts: TimeInterval) -> Int? {
+        guard self.columns > 0, ts >= self.start, ts < self.end else { return nil }
+        return Swift.min(self.columns - 1, Int((ts - self.start) / TimeInterval(self.columnSeconds)))
+    }
+
+    /// The trailing columns whose buckets the tier's ring can still hold.
+    ///
+    /// Only the Minimal preset can make this smaller than `columns`: a 30-day
+    /// range then reads from T0, whose ring holds 24 h. The older columns are
+    /// not merely empty, they are provably gone, and reading them would stride
+    /// a quarter of a million cells to prove it — so the read path skips them
+    /// and emits no-data columns instead.
+    public var retainedColumns: Int {
+        Swift.min(self.buckets.count, self.tier.buckets) / self.bucketsPerColumn
+    }
+
+    /// The bucket range the read path actually touches.
+    public var retainedBuckets: Range<UInt32> {
+        let width = UInt32(self.retainedColumns * self.bucketsPerColumn)
+        return (self.buckets.upperBound - width)..<self.buckets.upperBound
+    }
+
+    // MARK: - range -> tier and column width
+
+    /// What a range asks for before the chart's own width has a say: the tier
+    /// §3's table reads it from, and how many seconds one column covers.
+    private static func nominal(_ range: HistoryRange) -> (tier: HistoryTier, columnSeconds: Int) {
+        switch range {
+        case .hour: return (.t0, 10)          // 360 columns
+        case .sixHours: return (.t0, 30)      // 720 columns
+        case .day: return (.t1, 120)          // 720 columns
+        case .week: return (.t1, 1_200)       // 504 columns
+        case .month: return (.t2, 1_800)      // 1,440 columns
+        case .year: return (.t2, 21_600)      // 1,460 columns
+        }
+    }
+
+    /// The plan for a range ending at `now`.
+    ///
+    /// `maxColumns` is the chart's pixel width: a column narrower than a pixel
+    /// is work nobody can see, so the column grows by a whole factor rather
+    /// than by a fraction, which is what keeps every column an integer number
+    /// of buckets wide.
+    ///
+    /// `tiers` is what the store actually has open — the Minimal preset has
+    /// only T0 — and the fallback is the coarsest open tier that still divides
+    /// the column, never a finer column than the range asked for. That is §5's
+    /// "coarsest tier finer than one column" read from the other side.
+    public static func plan(for range: HistoryRange, endingAt now: TimeInterval,
+                            maxColumns: Int = HistoryColumnPlan.columnCap,
+                            tiers: [HistoryTier] = HistoryTier.allCases) -> HistoryColumnPlan {
+        let nominal = HistoryColumnPlan.nominal(range)
+        let tier = HistoryColumnPlan.tier(for: nominal, among: tiers)
+
+        var columnSeconds = nominal.columnSeconds
+        let budget = Swift.max(1, Swift.min(maxColumns, HistoryColumnPlan.columnCap))
+        let wanted = Swift.max(1, range.seconds / nominal.columnSeconds)
+        if wanted > budget {
+            // Round the factor up, so the plan never comes back wider than the
+            // budget, and keep it a multiple of the tier step so a column stays
+            // a whole number of buckets.
+            let factor = (wanted + budget - 1) / budget
+            columnSeconds = HistoryColumnPlan.aligned(nominal.columnSeconds * factor, to: tier.step)
+        }
+
+        let bucketsPerColumn = Swift.max(1, columnSeconds / tier.step)
+        let columns = Swift.max(1, Int((Double(range.seconds) / Double(columnSeconds)).rounded(.up)))
+        let width = UInt32(columns * bucketsPerColumn)
+
+        // The bucket `now` falls in is the newest one worth drawing: it is the
+        // one the accumulators are still filling, and a chart that stopped a
+        // column short of the present would look like a gap that is not there.
+        let last = HistoryClock.bucketIndex(now, step: tier.step)
+        let upper = last == .max ? last : last &+ 1
+        let lower = upper > width ? upper - width : 0
+        return HistoryColumnPlan(range: range, tier: tier, buckets: lower..<upper,
+                                 bucketsPerColumn: bucketsPerColumn)
+    }
+
+    /// The nominal tier when it is open, otherwise the coarsest open tier a
+    /// column is a whole number of buckets of. T0's 10 s step divides every
+    /// column width in the table, so this always answers.
+    private static func tier(for nominal: (tier: HistoryTier, columnSeconds: Int),
+                             among tiers: [HistoryTier]) -> HistoryTier {
+        if tiers.contains(nominal.tier) { return nominal.tier }
+        let usable = tiers.filter { $0.step <= nominal.columnSeconds && nominal.columnSeconds % $0.step == 0 }
+        return usable.max(by: { $0.step < $1.step }) ?? .t0
+    }
+
+    /// The next multiple of `step` at or above `value`.
+    private static func aligned(_ value: Int, to step: Int) -> Int {
+        guard step > 1 else { return value }
+        let remainder = value % step
+        return remainder == 0 ? value : value + (step - remainder)
+    }
+}
+
+// MARK: - a lane, resampled into drawn columns
+
+/// What the chart is handed for one lane: the directory entry it draws its
+/// label, unit and colour from, and the columns themselves. Never the decoded
+/// series — that is what keeps the window's memory range-independent (§7).
+public struct HistoryLaneColumns {
+    public let lane: Int
+    public let entry: HistoryLaneEntry
+    public let columns: [HistoryColumn?]
+
+    public init(lane: Int, entry: HistoryLaneEntry, columns: [HistoryColumn?]) {
+        self.lane = lane
+        self.entry = entry
+        self.columns = columns
+    }
+
+    /// Min, count-weighted average and max over the drawn columns: the y axis
+    /// is scaled from the first two and the readout table shows all three.
+    public var summary: HistoryLaneSummary? {
+        var min: Float = 0
+        var max: Float = 0
+        var sum: Double = 0
+        var count: UInt64 = 0
+
+        for case let column? in self.columns where column.count > 0 {
+            if count == 0 {
+                min = column.min
+                max = column.max
+            } else {
+                if column.min < min { min = column.min }
+                if column.max > max { max = column.max }
+            }
+            sum += Double(column.avg) * Double(column.count)
+            count += UInt64(column.count)
+        }
+
+        guard count > 0 else { return nil }
+        return HistoryLaneSummary(min: min, max: max, avg: Float(sum / Double(count)), count: count)
+    }
+}
+
+/// The min/avg/max of one lane over the visible range.
+public struct HistoryLaneSummary: Equatable {
+    public let min: Float
+    public let max: Float
+    public let avg: Float
+    public let count: UInt64
+
+    public init(min: Float, max: Float, avg: Float, count: UInt64) {
+        self.min = min
+        self.max = max
+        self.avg = avg
+        self.count = count
+    }
+}
+
+/// One answered query: the plan the columns were cut to, and one entry per
+/// lane that still exists.
+public struct HistoryQueryResult {
+    public let plan: HistoryColumnPlan
+    public let lanes: [HistoryLaneColumns]
+
+    public init(plan: HistoryColumnPlan, lanes: [HistoryLaneColumns]) {
+        self.plan = plan
+        self.lanes = lanes
+    }
+}
+
+extension HistoryAggregate {
+    /// Resamples a contiguous run of buckets into drawn columns.
+    ///
+    /// `slots` starts at `firstBucket` and is a whole number of columns long;
+    /// the caller — `HistoryStore.columns(lane:plan:spans:)` — is what
+    /// guarantees that, because it is also what clamps the read to the ring.
+    ///
+    /// The gap reasons come from one pass of the resolver over the whole range
+    /// rather than one pass per column: both are sorted, so the spans are
+    /// walked alongside the buckets at O(buckets + spans) instead of the
+    /// O(buckets × spans) a per-column call would cost, which at a year of
+    /// buckets and a year of accumulated sleeps is the difference between
+    /// thousands of comparisons and millions (§4). The pass answers for every
+    /// bucket in the range and not only for the empty ones — 17,520 of them at
+    /// 1 y — which a gap-free chart pays for and reads none of; resolving the
+    /// empty runs lazily is the version to reach for if that ever shows up in a
+    /// profile.
+    ///
+    /// A column with no sample in it is never interpolated across: it comes
+    /// back either as `nil` — nothing to say — or as a zero-count column
+    /// carrying the reason, which is what the chart hatches and the readout
+    /// turns into a sentence.
+    public static func columns(_ slots: [HistorySlot?], from firstBucket: UInt32,
+                               bucketsPerColumn: Int,
+                               resolver: HistoryGapResolver?) -> [HistoryColumn?] {
+        let width = Swift.max(1, bucketsPerColumn)
+        let count = slots.count / width
+        guard count > 0 else { return [] }
+
+        let reasons = resolver?.reasons(for: firstBucket..<(firstBucket &+ UInt32(count * width)), slots: slots)
+        return (0..<count).map { index in
+            let run = (index * width)..<((index + 1) * width)
+            let rolled = HistoryAggregate.column(slots[run])
+            if let column = rolled, column.count > 0 { return column }
+
+            // Empty: the reason is the first thing said about any bucket in the
+            // run, by position and not by specificity — a column straddling the
+            // end of a sleep therefore reads "Asleep" rather than "Stats not
+            // running", which is the better of the two answers anyway. A slot
+            // the recorder wrote answers for itself through the resolver, so a
+            // held or asleep bucket keeps its own word even where the
+            // neighbours have nothing.
+            guard let reasons = reasons else { return rolled }
+            var reason: HistoryGapReason = .nodata
+            for bucket in run where bucket < reasons.count && reasons[bucket] != .nodata {
+                reason = reasons[bucket]
+                break
+            }
+            return reason == .nodata ? nil : HistoryColumn(min: 0, max: 0, avg: 0, count: 0, reason: reason)
+        }
+    }
+}

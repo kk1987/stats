@@ -118,7 +118,7 @@ Day 1 = day 365 at a given lane count; the only thing that grows is the lane cou
 
 **The 256 MiB budget is an on-disk budget**: it bounds the archive files in `history/`, not the process's footprint — the write path is `pwrite`, so nothing is held dirty in memory, and the query path maps the tier files read-only, so those are clean file-backed pages the kernel may evict at any time. Resident memory is budgeted separately in §7 (< 1 MiB idle, +< 300 KiB with the window open).
 
-Read-side column counts are integer multiples of the tier step (360 at 10 s for 1 h, 720 at 2 min for 24 h, 504 for 7 d, 1,440 at 30 min for 30 d), capped by chart width, so the min/max envelope does not stutter at exactly the ranges users stare at.
+Read-side column counts are integer multiples of the tier step (360 at 10 s for 1 h, 720 at 30 s for 6 h, 720 at 2 min for 24 h, 504 at 20 min for 7 d, 1,440 at 30 min for 30 d, 1,460 at 6 h for 1 y), capped by chart width, so the min/max envelope does not stutter at exactly the ranges users stare at. The 1 y figure is what the integer-multiple rule costs at that range: 17,520 T2 buckets divide by 12 and not by 12.17, so the year is 1,460 six-hour columns rather than 1,440 of uneven width.
 
 **Write cadence.** One `DispatchSourceTimer` for the whole feature: **60 s**, 5 s leeway, `.utility`, private serial queue `eu.exelban.history`, **suspended when no accumulator is dirty**. Each tick closes completed T0 buckets and `pwrite`s the changed row range; T1/T2 rows are written only when their buckets close and are **always rolled up from T0** (min of mins, max of maxes, sums, counts), never accumulated in memory. `fsync` on sleep, on `applicationWillTerminate`, and every 10 min — stretched to 30 min on battery, in Low Power Mode, or at `thermalState >= .serious` (both APIs exist at the macOS 12 target and appear nowhere in the codebase today). 60 s rather than 30 s halves the write volume at the cost of losing at most 60 s of unflushed accumulator on `kill -9`; for a background feature that is the right side of the trade.
 
@@ -224,8 +224,8 @@ One "Stored history" section in App settings — **no per-module checkbox in the
 | wakeups | — | 1/min, 5 s leeway, suspended when idle | one timer for the feature |
 | disk | — | ~0.36 MiB/h (21 lanes), ~0.6 (45), ~1.1 (116) | block-floor derivation in §3; `fsync` 10 min, 30 on battery/LPM/thermal |
 | memory, idle | — | < 1 MiB | 64 B/lane accumulators (< 16 KiB at the cap) + header and directory pages |
-| memory, window open | — | **+< 300 KiB, range-independent** | ≤1,440 columns × 16 B × visible lanes (8 lanes ≈ 184 KiB); the decoded tier read is streamed into columns, never retained |
-| window first paint | main + read queue | < 50 ms | aggregate to pixel columns **on the history queue** (read cost table, §3); hand main ~1,440 columns × visible lanes, never the decoded series |
+| memory, window open | — | **+< 300 KiB, range-independent** | ≤1,460 columns × 16 B × visible lanes (8 lanes ≈ 182 KiB); the decoded tier read is streamed into columns, never retained |
+| window first paint | main + read queue | < 50 ms | aggregate to pixel columns **on the history queue** (read cost table, §3); hand main ≤1,460 columns × visible lanes, never the decoded series |
 
 The loaded-window memory figure is the same for a 1-hour and a 1-year view — that is the point of aggregating to columns on the read queue. Only the *transient* read buffer differs, and it is consumed page by page rather than materialized (40.6 MB of T2 at 116 lanes is mapped, not copied).
 

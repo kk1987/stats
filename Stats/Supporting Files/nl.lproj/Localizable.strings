@@ -530,6 +530,16 @@
 "Recorded usage history will also be deleted." = "Recorded usage history will also be deleted.";
 "%0 lane · %1" = "%0 lane · %1";
 "History could not be deleted" = "History could not be deleted";
+"Usage history chart" = "Usage history chart";
+"%0 lanes, %1 to %2" = "%0 lanes, %1 to %2";
+"%0 lane, %1 to %2" = "%0 lane, %1 to %2";
+"Minimum %0, average %1, maximum %2" = "Minimum %0, average %1, maximum %2";
+"Recorded" = "Recorded";
+"Last known value" = "Last known value";
+"Asleep" = "Asleep";
+"Stats not running" = "Stats not running";
+"Clock changed" = "Clock changed";
+"No data" = "No data";
 "Install fan helper" = "Installeer het ventilator-hulpprogramma";
 "Uninstall fan helper" = "Verwijder het ventilator-hulpprogramma.";
 "Fan value" = "Waarde van de ventilator"; // translategemma:4b
