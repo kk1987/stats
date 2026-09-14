@@ -81,6 +81,35 @@ private struct HistoryLaneSlot {
 /// lane.
 private var sensorLanes: [String: HistoryLaneSlot] = [:]
 
+/// Everything a non-curated sensor needs on the hot path, precomputed: the lane
+/// key, the string its identity hashes from, the unit it stores under, and the
+/// last answer `HistoryOptionalLanes` gave for it.
+///
+/// The cached answer is what makes the hot path a dictionary lookup. Asking
+/// `isEnabled(stableKey:)` per sensor hashes a `String` into a `Set` behind an
+/// `os_unfair_lock`, so the 116-sensor case is ~110 hashes and ~110 lock round
+/// trips per tick, all of it inside the recorder's own lock. `enabledRevision`
+/// is the generation the answer was given at; the tick reads the current one
+/// once and only a sensor whose answer predates it asks again.
+private struct HistoryOptionalSlot {
+    let key: HistoryLaneKey
+    let stableKey: String
+    let unit: HistoryLaneUnit
+    /// `HistoryOptionalLanes.enabledGeneration` never hands out 0, so a slot
+    /// built here always asks once.
+    var enabled: Bool = false
+    var enabledRevision: UInt64 = 0
+}
+
+/// The non-curated sensors seen this launch, keyed by SMC key. The tick that
+/// adds an entry is also the one that offers the lane to `HistoryOptionalLanes`,
+/// so the steady state — a hundred sensors, all offered on the first tick, none
+/// of them enabled — costs one dictionary lookup and one integer compare each:
+/// no `lowercased()`, no `stableKey` interpolation, no `offer` call, no lock
+/// and no allocation at all — which is what keeps the 116-sensor Intel Mac
+/// inside §7's 50 µs container budget.
+private var optionalSensors: [String: HistoryOptionalSlot] = [:]
+
 @inline(__always)
 private func historyLane(_ cache: inout [String: HistoryLaneSlot], _ key: String, at ts: UInt64,
                          into sink: inout HistorySink,
@@ -118,6 +147,10 @@ extension Sensors_List: HistoryProvider {
         let ts = sink.timestamp
         // One cross-queue copy of the whole array per tick, then in place (§2).
         let sensors = self.sensors
+        // One lock round trip for the whole tick rather than one per sensor:
+        // every non-curated slot compares against this and only re-asks when
+        // the user has touched a checkbox since.
+        let enabledGeneration = HistoryOptionalLanes.shared.enabledGeneration
 
         for sensor in sensors {
             let key = sensor.key
@@ -136,15 +169,79 @@ extension Sensors_List: HistoryProvider {
                 continue
             }
 
-            guard sensor.type == .temperature, isCuratedTemperature(key), sensor.value > 0 else { continue }
+            if sensor.type == .temperature, isCuratedTemperature(key) {
+                guard sensor.value > 0 else { continue }
+                if let lane = historyLane(&sensorLanes, key, at: ts, into: &sink, {
+                    HistoryLaneDescriptor(key: HistoryLaneKey(module: .sensors, source: key, metric: "temperature"),
+                                          unit: .celsius, kind: .gauge, label: sensor.name)
+                }) {
+                    // `value` is degrees Celsius; `localValue` is the display
+                    // conversion and would store Fahrenheit for half the world.
+                    sink.emit(lane: lane, value: sensor.value)
+                }
+                continue
+            }
+
+            // Everything outside the curated set: offered to the history
+            // window's sidebar, and recorded only once the user has checked it
+            // there (§6 — per-lane opt-in belongs where the lanes are
+            // enumerated, not in Modules/Sensors/settings.swift).
+            guard let unit = optionalUnit(sensor.type) else { continue }
+
+            var slot: HistoryOptionalSlot
+            if let known = optionalSensors[key] {
+                slot = known
+            } else {
+                // Once per SMC key per launch: the only place the metric name
+                // is lowercased and the only place the stable key is spelled.
+                // Offered before the value is looked at, so that a power or
+                // voltage sensor reading exactly 0 — which some do on every
+                // tick of a machine that is plugged in — still reaches the
+                // catalogue and can be opted into. The catalogue is meant to
+                // describe the hardware, not what the hardware happened to read
+                // the first time it was asked.
+                let laneKey = HistoryLaneKey(module: .sensors, source: key,
+                                             metric: sensor.type.rawValue.lowercased())
+                slot = HistoryOptionalSlot(key: laneKey, stableKey: laneKey.stableKey, unit: unit)
+                HistoryOptionalLanes.shared.offer(HistoryLaneDescriptor(key: laneKey, unit: unit,
+                                                                       kind: .gauge, label: sensor.name))
+            }
+            // A fresh slot carries revision 0 and so always falls in here once;
+            // afterwards only a tick that follows a checkbox does.
+            if slot.enabledRevision != enabledGeneration {
+                slot.enabled = HistoryOptionalLanes.shared.isEnabled(stableKey: slot.stableKey)
+                slot.enabledRevision = enabledGeneration
+                optionalSensors[key] = slot
+            }
+            guard slot.enabled else { continue }
+
+            // Zero is "not available" to the reader itself, and a zero folded
+            // into a bucket would pin its min to a reading nobody took; a
+            // negative one is a real discharge on a power sensor. It gates the
+            // sample, not the offer above.
+            guard sensor.value != 0 else { continue }
             if let lane = historyLane(&sensorLanes, key, at: ts, into: &sink, {
-                HistoryLaneDescriptor(key: HistoryLaneKey(module: .sensors, source: key, metric: "temperature"),
-                                      unit: .celsius, kind: .gauge, label: sensor.name)
+                HistoryLaneDescriptor(key: slot.key, unit: slot.unit, kind: .gauge, label: sensor.name)
             }) {
-                // `value` is degrees Celsius; `localValue` is the display
-                // conversion and would store Fahrenheit for half the world.
                 sink.emit(lane: lane, value: sensor.value)
             }
         }
+    }
+}
+
+/// The unit an opt-in sensor is stored under, or `nil` for a type the slot
+/// format has no unit byte for.
+///
+/// Current (amps) and energy are dropped rather than stored under a wrong
+/// unit: `HistoryLaneUnit` is a stored enum in the 128 B directory entry, so
+/// adding a case is a format decision and not a UI one. They are the two
+/// smallest families on any Mac this runs on, and a lane labelled volts that
+/// holds amps would be worse than no lane.
+private func optionalUnit(_ type: SensorType) -> HistoryLaneUnit? {
+    switch type {
+    case .temperature: return .celsius
+    case .voltage: return .volts
+    case .power: return .watts
+    default: return nil
     }
 }

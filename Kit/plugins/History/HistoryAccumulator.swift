@@ -921,6 +921,16 @@ public struct HistoryColumnPlan: Equatable {
         }
     }
 
+    /// How many columns a range asks for before a chart width has a say.
+    ///
+    /// `plan` only ever *widens* columns, so every `maxColumns` at or above
+    /// this number produces the identical plan. That is what lets the window
+    /// tell a resize that changes the plan from one that cannot: a one-hour
+    /// view is 360 columns and the window opens at 1,020 pt wide.
+    public static func nominalColumns(for range: HistoryRange) -> Int {
+        Swift.max(1, range.seconds / HistoryColumnPlan.nominal(range).columnSeconds)
+    }
+
     /// The plan for a range ending at `now`.
     ///
     /// `maxColumns` is the chart's pixel width: a column narrower than a pixel
@@ -940,7 +950,7 @@ public struct HistoryColumnPlan: Equatable {
 
         var columnSeconds = nominal.columnSeconds
         let budget = Swift.max(1, Swift.min(maxColumns, HistoryColumnPlan.columnCap))
-        let wanted = Swift.max(1, range.seconds / nominal.columnSeconds)
+        let wanted = HistoryColumnPlan.nominalColumns(for: range)
         if wanted > budget {
             // Round the factor up, so the plan never comes back wider than the
             // budget, and keep it a multiple of the tier step so a column stays

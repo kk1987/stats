@@ -338,6 +338,29 @@ public final class HistoryRecorder {
     /// Lanes the registry currently holds, for the "N lanes · X MB" readout.
     public var laneCount: Int { self.locked { self.directory.count } }
 
+    /// Every lane the registry holds, in lane-id order — index in the array is
+    /// the lane id `query(lanes:)` takes. This is what the window sidebar is
+    /// built from: it carries the module byte it groups by, the `label` it
+    /// shows, the flags it greys on and the `lastUsedTs` it dates an orphan
+    /// from, which is the whole reason the directory entry is 128 B (§3).
+    ///
+    /// Empty until `start` has adopted the stored directory, so a window opened
+    /// with the master switch off shows no lanes rather than lanes nothing is
+    /// writing to.
+    public var lanes: [HistoryLaneEntry] { self.locked { self.directory.all } }
+
+    /// The registry's own revision, bumped by everything that changes the
+    /// directory as the file stores it — a lane registered, a lane reclaimed
+    /// for a new identity, a label or a flag rewritten — and deliberately not
+    /// by the per-commit touch of `lastUsedTs`.
+    ///
+    /// The window compares it to decide whether to rebuild its sidebar. A lane
+    /// count cannot answer that question: a reclaim swaps one identity for
+    /// another without moving the count, and at the 256-lane cap the count
+    /// never moves again, so a reclaim there would leave the sidebar naming a
+    /// series the chart no longer draws.
+    public var laneRevision: UInt64 { self.locked { self.directory.revision } }
+
     /// Opens the archives, takes the cross-process lock and catches the coarse
     /// tiers up on whatever closed while the app was down. Asynchronous on
     /// purpose: this is file I/O and `applicationDidFinishLaunching` is on main.
@@ -360,6 +383,12 @@ public final class HistoryRecorder {
             debug("history: the recorder stays idle, this process is an XCTest host")
             return
         }
+        // Built here rather than where it is first asked a question. The first
+        // question comes from `emitHistory`, which runs on a reader queue with
+        // this recorder's lock held, and the initializer reads `Store` — cheap
+        // and once, but the one piece of lazy, defaults-reading work that could
+        // otherwise land inside the ingest lock.
+        _ = HistoryOptionalLanes.shared
         self.queue.async { self.performStart(enabled: enabled) }
     }
 
@@ -997,18 +1026,15 @@ public final class HistoryRecorder {
 
     // MARK: - read-side query (columns for the chart)
 
-    /// The plan a range resolves to right now, against the tiers this store
-    /// actually has open. The chart asks for it separately from the data
-    /// because the x axis and the column geometry are the same whether or not
-    /// a lane has anything in them.
-    ///
-    /// Must not be called from the history queue.
-    public func plan(for range: HistoryRange, maxColumns: Int = HistoryColumnPlan.columnCap,
-                     at now: TimeInterval? = nil) -> HistoryColumnPlan {
-        let when = now ?? self.environment.now()
-        let tiers = self.queue.sync { self.store.openTiers }
-        return HistoryColumnPlan.plan(for: range, endingAt: when, maxColumns: maxColumns, tiers: tiers)
-    }
+    // There is deliberately no synchronous "just the plan" accessor here. The
+    // column geometry is the same whether or not a lane has anything in it, so
+    // one looked worth having for the empty sidebar selection — but resolving
+    // it needs `store.openTiers`, and reaching that means `queue.sync` on the
+    // queue that also creates the archives, commits every 60 s, `fsync`s every
+    // ten minutes and reads up to 40 MB of T2 for a year. §7 budgets main for
+    // none of that. `query(lanes: [], …)` below answers the same question
+    // asynchronously: it plans against the same open tiers and returns an
+    // empty lane list.
 
     /// Reads a range for a set of lanes and hands the answer to `completion` on
     /// main.
