@@ -278,7 +278,7 @@ Stored: numeric series plus identifiers — SMC keys, GPU ids and models, volume
 10. `feat: time-indexed history chart with min/max band` (~700)
 11. `feat: history window with range picker, sidebar and crosshair` (~700)
 12. `feat: open the history window from popups and settings` (~70, upstream: `separatorView` button parameter, five popup call sites, the Settings sidebar entry, ⌃⌥H)
-13. `feat: retention presets with copy-forward rebuild` (~140)
+13. `feat: retention presets with copy-forward rebuild` (~140, incl. the grow and shrink tests — they cover this commit's code, so they ship with it rather than in 15)
 14. `feat: CSV export of the visible range` (~150)
 15. `test: sleep, clock-step, preset, export and benchmark tests` (~200) — **end of release 2**
 
@@ -287,7 +287,7 @@ Stored: numeric series plus identifiers — SMC keys, GPU ids and models, volume
 - **Commit 2 — archive.** Ring wraparound at a tier boundary; stale-slot rejection after a wrap; `firstValidBucket` so a fresh archive reads as no-data; header CRC rejection and recreate; truncated-file recreate; **directory disagreement between tiers resolved from T0**; **header rehydration of `lastCommitBucket` and `monotonicAnchor` across a simulated launch**; a bit-flip fuzz loop asserting no trap and no out-of-bounds read; **the three-strikes ENOSPC suspend and retry, and the low-free-space skip**.
 - **Commit 3 — lanes and accumulators.** Rate conversion across a mid-series interval change; `dt <= 0` and non-finite rejection; **step-lane hold over a 40-minute idle stretch, asserting `HELD` for 15 min then `NODATA`**; lane LRU reclaim; `label` truncation on a scalar boundary.
 - **Commit 4 — recorder.** Rollup with partially-populated and empty fine buckets; **coarse-tier catch-up rollup after a simulated restart, including a gap longer than T0 retention**; count-weighted resampling; gap-reason derivation at read; **a TSAN run with Battery ingest on main racing the commit thread**.
-- **Commit 15 — what is left.** Simulated 9-hour sleep; backward clock jump inside and outside the window; gap ≥ tier capacity resets rather than iterating; **lane-growth copy-forward rebuild**; **retention grow (Minimal → Standard) and shrink**; **the daily network accumulator rolling over local midnight, across a DST boundary, and across a timezone change**; `emitHistory` benchmarks per payload type; CSV formatting including gap and `HELD` rows.
+- **Commit 15 — what is left.** Simulated 9-hour sleep; backward clock jump inside and outside the window; gap ≥ tier capacity resets rather than iterating; **lane-growth copy-forward rebuild**; **the daily network accumulator rolling over local midnight, across a DST boundary, and across a timezone change**; `emitHistory` benchmarks per payload type; CSV formatting including gap and `HELD` rows.
 
 Split this way the suite costs ~100 lines more than one lump commit (~630 against ~520) because each part carries its own fixtures; that is the price of R1 shipping tested rather than trusted. The `Tests/` XCTest target already exists (`Kit.swift`, `RAM.swift`), so no new target — `Tests/History.swift` is registered in commit 1 with every other new file.
 
