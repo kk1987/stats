@@ -8,6 +8,9 @@
 
 import Foundation
 
+// swiftlint:disable empty_count
+// `count` on a slot is an integer sample count, not a collection.
+
 // MARK: - tiers and presets
 
 /// One resolution tier. Every tier is a separate file in `history/`.
