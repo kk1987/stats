@@ -1113,3 +1113,5 @@ extension HistoryAggregate {
         }
     }
 }
+
+// swiftlint:enable empty_count

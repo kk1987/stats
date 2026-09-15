@@ -9,6 +9,9 @@
 import Cocoa
 import UniformTypeIdentifiers
 
+// swiftlint:disable empty_count
+// `count` on a column is an integer sample count, not a collection.
+
 /// Writes the visible range of the selected lanes as CSV, on the read path the
 /// chart needs anyway. Gap and held buckets are marked rather than emitted as
 /// values, so an exported series never presents a held or missing sample as a
@@ -314,3 +317,5 @@ public extension HistoryGapReason {
         }
     }
 }
+
+// swiftlint:enable empty_count
