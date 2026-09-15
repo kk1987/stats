@@ -15,6 +15,7 @@
 		236D6C248B0F56D83B527D25 /* HistoryRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBB1D83B288FA4606A91E2A1 /* HistoryRecorder.swift */; };
 		452B19EB20D2D5C8E97B9F6B /* History.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E5F006031D2D5B990B689B8 /* History.swift */; };
 		4A05F9BD83C04F70BFFF7F37 /* Kit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 369463B2B7EA4AF0A895A9B6 /* Kit.swift */; };
+		4D7C31A2B5E94F0D8A16C2D9 /* HistoryChart.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D9E5B7C3A1F4D2E8B6C0A17 /* HistoryChart.swift */; };
 		4D2E66D6E3AA4BD8C0AECD3A /* HistoryWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB6500C4BDC1C23CF3F7C31 /* HistoryWindow.swift */; };
 		4DD9EC19B115BD996236B02D /* History.swift in Sources */ = {isa = PBXBuildFile; fileRef = A531559170BFA3AC002E0634 /* History.swift */; };
 		50EAB8FC35F314EA6FD6EDB5 /* History.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05B32594B5D895ACE4819B5C /* History.swift */; };
@@ -562,6 +563,7 @@
 		40BE2B202745D63800AE9396 /* da */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = da; path = da.lproj/Localizable.strings; sourceTree = "<group>"; };
 		47665544298DC92F00F7B709 /* sk */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = sk; path = sk.lproj/Localizable.strings; sourceTree = "<group>"; };
 		4921436D25319699000A1C47 /* ko */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ko; path = ko.lproj/Localizable.strings; sourceTree = "<group>"; };
+		4D9E5B7C3A1F4D2E8B6C0A17 /* HistoryChart.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HistoryChart.swift; sourceTree = "<group>"; };
 		4DB6500C4BDC1C23CF3F7C31 /* HistoryWindow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HistoryWindow.swift; sourceTree = "<group>"; };
 		4F92E6432D0F293100EA593F /* fi */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = fi; path = fi.lproj/Localizable.strings; sourceTree = "<group>"; };
 		5C038CF52D86EE8700516809 /* SystemStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemStats.swift; sourceTree = "<group>"; };
@@ -1432,6 +1434,7 @@
 				DBB1D83B288FA4606A91E2A1 /* HistoryRecorder.swift */,
 				32770F9D61A70D0AE2BB69F7 /* HistoryClock.swift */,
 				D75969BE681C2A6BDABB0C29 /* HistorySettingsView.swift */,
+				4D9E5B7C3A1F4D2E8B6C0A17 /* HistoryChart.swift */,
 				4DB6500C4BDC1C23CF3F7C31 /* HistoryWindow.swift */,
 				DFD5C9AB8908D6D7659D5B3D /* HistoryExport.swift */,
 				60CA86AF479086828C1EA0ED /* HistoryDebug.swift */,
@@ -2324,6 +2327,7 @@
 				236D6C248B0F56D83B527D25 /* HistoryRecorder.swift in Sources */,
 				066181CE04616BBD86D0B224 /* HistoryClock.swift in Sources */,
 				02B793EE15C9151B057C7167 /* HistorySettingsView.swift in Sources */,
+				4D7C31A2B5E94F0D8A16C2D9 /* HistoryChart.swift in Sources */,
 				4D2E66D6E3AA4BD8C0AECD3A /* HistoryWindow.swift in Sources */,
 				E07B0B8FE8B25B1121777406 /* HistoryExport.swift in Sources */,
 				72250E8474FF972D487B74FF /* HistoryDebug.swift in Sources */,

@@ -1598,3 +1598,5 @@ internal enum HistoryCRC32 {
         return ~crc
     }
 }
+
+// swiftlint:enable empty_count
