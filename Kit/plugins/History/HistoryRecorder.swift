@@ -1236,6 +1236,26 @@ public final class HistoryRecorder {
         }
     }
 
+    /// Answers a plan the caller already has, and runs `completion` **on the
+    /// history queue** rather than on main.
+    ///
+    /// The CSV export is what wants both halves. The plan is passed in because
+    /// the file has to hold the range the window was showing when the button
+    /// was pressed, not a range re-planned against "now" after however long the
+    /// save panel stood open. And the answer is delivered where it was
+    /// computed because the caller's next move is to format ~1,460 rows and
+    /// write a file, which §7 budgets main for no more than it budgets it for
+    /// the read.
+    ///
+    /// Must not be called from the history queue.
+    public func query(lanes: [Int], plan: HistoryColumnPlan,
+                      completion: @escaping (HistoryQueryResult) -> Void) {
+        let spans = self.sleepMonitor.spans
+        self.queue.async {
+            completion(self.store.query(lanes: lanes, plan: plan, spans: spans))
+        }
+    }
+
     /// The same read, answered inline. For the CSV export and for tests, which
     /// need the answer where they stand; the chart uses the asynchronous form.
     ///
