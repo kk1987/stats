@@ -946,7 +946,7 @@ private final class HistoryLaneSidebarView: NSView, NSSearchFieldDelegate {
         return true
     }
 
-    /// TODO: diff the rows instead of rebuilding them. `controlTextDidChange`
+    /// Rebuilds the rows rather than diffing them. `controlTextDidChange`
     /// lands here on every keystroke of the filter field, and at the lane cap
     /// plus a sensors-heavy catalogue that is a few hundred `NSButton`s and a
     /// width constraint each, torn down and built again per character. Nothing
