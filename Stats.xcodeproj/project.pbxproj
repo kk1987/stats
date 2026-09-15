@@ -235,7 +235,13 @@
 		AA00000000000000000000A1 /* libIOReport.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 5C1E45552D11D66200525864 /* libIOReport.tbd */; };
 		E07B0B8FE8B25B1121777406 /* HistoryExport.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFD5C9AB8908D6D7659D5B3D /* HistoryExport.swift */; };
 		F5CECAC227EA0A2F1F2C2487 /* HistoryLane.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5326AF215EC31FFAA4195F9 /* HistoryLane.swift */; };
-		F71F0DB6530BB74986887945 /* History.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E6313CB21326BB225E2F795 /* History.swift */; };
+		D812C9667836EAE00DE362F4 /* HistoryTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3BD77055F0EAED2056683CC /* HistoryTestSupport.swift */; };
+		31FFA227A88E49919795BFA5 /* HistoryArchiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1E81F42161C4B8A56BC9F60 /* HistoryArchiveTests.swift */; };
+		6E55584EEB6FE134578254EB /* HistoryLaneTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CAE4A31982201C281DF0428 /* HistoryLaneTests.swift */; };
+		456D06F78C971F95D100C168 /* HistoryRecorderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84A82A2CA709D0354395C455 /* HistoryRecorderTests.swift */; };
+		ADA836351BD66A6503C8211A /* HistoryClockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFBF9588B6CF324435F52EAA /* HistoryClockTests.swift */; };
+		C08FA6F221B4A3347A8E615B /* HistoryOutputTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEFD6DDFD32B21DE52D4A84E /* HistoryOutputTests.swift */; };
+		067E4ACA0C84AB393290A888 /* HistoryBenchmarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BCC5E30F2A2F41A51AF4C30 /* HistoryBenchmarkTests.swift */; };
 		FF8C1052BFBD88FC1F94089F /* HistoryArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89891F943C355881698B28EE /* HistoryArchive.swift */; };
 /* End PBXBuildFile section */
 
@@ -662,7 +668,13 @@
 		"6ed2e290-b69e-4630-8e38-1ceafc12e572" /* ta */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ta; path = ta.lproj/Localizable.strings; sourceTree = "<group>"; };
 		7725E58A81468427E4572EC3 /* History.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = History.swift; sourceTree = "<group>"; };
 		7A19DAE52552C326001B192F /* fr */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = fr; path = fr.lproj/Localizable.strings; sourceTree = "<group>"; };
-		7E6313CB21326BB225E2F795 /* History.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = History.swift; sourceTree = "<group>"; };
+		A3BD77055F0EAED2056683CC /* HistoryTestSupport.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HistoryTestSupport.swift; sourceTree = "<group>"; };
+		C1E81F42161C4B8A56BC9F60 /* HistoryArchiveTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HistoryArchiveTests.swift; sourceTree = "<group>"; };
+		7CAE4A31982201C281DF0428 /* HistoryLaneTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HistoryLaneTests.swift; sourceTree = "<group>"; };
+		84A82A2CA709D0354395C455 /* HistoryRecorderTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HistoryRecorderTests.swift; sourceTree = "<group>"; };
+		AFBF9588B6CF324435F52EAA /* HistoryClockTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HistoryClockTests.swift; sourceTree = "<group>"; };
+		DEFD6DDFD32B21DE52D4A84E /* HistoryOutputTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HistoryOutputTests.swift; sourceTree = "<group>"; };
+		0BCC5E30F2A2F41A51AF4C30 /* HistoryBenchmarkTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HistoryBenchmarkTests.swift; sourceTree = "<group>"; };
 		874F64AC944602D6F9A773CF /* History.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = History.swift; sourceTree = "<group>"; };
 		89891F943C355881698B28EE /* HistoryArchive.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HistoryArchive.swift; sourceTree = "<group>"; };
 		9068FE5F25AC4516006FCAA6 /* cs */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = cs; path = cs.lproj/Localizable.strings; sourceTree = "<group>"; };
@@ -1341,7 +1353,13 @@
 				9AAC5E2E280ACC120043D892 /* Info.plist */,
 				9AAC5E40280ACC210043D892 /* RAM.swift */,
 				369463B2B7EA4AF0A895A9B6 /* Kit.swift */,
-				7E6313CB21326BB225E2F795 /* History.swift */,
+				A3BD77055F0EAED2056683CC /* HistoryTestSupport.swift */,
+				C1E81F42161C4B8A56BC9F60 /* HistoryArchiveTests.swift */,
+				7CAE4A31982201C281DF0428 /* HistoryLaneTests.swift */,
+				84A82A2CA709D0354395C455 /* HistoryRecorderTests.swift */,
+				AFBF9588B6CF324435F52EAA /* HistoryClockTests.swift */,
+				DEFD6DDFD32B21DE52D4A84E /* HistoryOutputTests.swift */,
+				0BCC5E30F2A2F41A51AF4C30 /* HistoryBenchmarkTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -2417,7 +2435,13 @@
 			files = (
 				9AAC5E41280ACC210043D892 /* RAM.swift in Sources */,
 				4A05F9BD83C04F70BFFF7F37 /* Kit.swift in Sources */,
-				F71F0DB6530BB74986887945 /* History.swift in Sources */,
+				D812C9667836EAE00DE362F4 /* HistoryTestSupport.swift in Sources */,
+				31FFA227A88E49919795BFA5 /* HistoryArchiveTests.swift in Sources */,
+				6E55584EEB6FE134578254EB /* HistoryLaneTests.swift in Sources */,
+				456D06F78C971F95D100C168 /* HistoryRecorderTests.swift in Sources */,
+				ADA836351BD66A6503C8211A /* HistoryClockTests.swift in Sources */,
+				C08FA6F221B4A3347A8E615B /* HistoryOutputTests.swift in Sources */,
+				067E4ACA0C84AB393290A888 /* HistoryBenchmarkTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
