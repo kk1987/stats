@@ -10,6 +10,10 @@
 import Foundation
 import os
 
+// swiftlint:disable empty_count
+// `count` throughout this file is an integer sample count on a slot or an
+// accumulator, not a collection: there is no `isEmpty` to prefer.
+
 // MARK: - reader identity
 
 /// Identifies the reader a sample came from. Passed explicitly, never inferred
@@ -365,19 +369,17 @@ public final class HistoryAccumulatorTable {
     /// holding one series' last known value into another series' buckets is
     /// exactly the kind of quiet lie this feature must not tell.
     public func bind(lane: Int, kind: HistoryLaneKind) {
-        self.locked { () -> Void in
+        self.locked {
             guard lane >= 0, lane < self.capacity else { return }
             self.accumulators[lane] = HistoryAccumulator(kind: kind)
-            for row in 0..<HistoryAccumulatorTable.pendingBuckets {
-                if self.pending[row * self.capacity + lane].isRecorded {
-                    self.pendingCount[row] -= 1
-                    self.pending[row * self.capacity + lane] = HistorySlot()
-                    // Only a row this lane actually emptied gives its stamp
-                    // back. Rows it never occupied are none of its business,
-                    // and a stamp dropped out from under another lane's staged
-                    // slot would make the drain skip it.
-                    if self.pendingCount[row] <= 0 { self.pendingStamp[row] = nil }
-                }
+            for row in 0..<HistoryAccumulatorTable.pendingBuckets where self.pending[row * self.capacity + lane].isRecorded {
+                self.pendingCount[row] -= 1
+                self.pending[row * self.capacity + lane] = HistorySlot()
+                // Only a row this lane actually emptied gives its stamp
+                // back. Rows it never occupied are none of its business,
+                // and a stamp dropped out from under another lane's staged
+                // slot would make the drain skip it.
+                if self.pendingCount[row] <= 0 { self.pendingStamp[row] = nil }
             }
             if lane >= self.lanes { self.lanes = lane + 1 }
         }
@@ -393,7 +395,7 @@ public final class HistoryAccumulatorTable {
     /// bound for are about to be unlinked and a row that outlived them would be
     /// written into the empty file that replaces them.
     public func discardAll() {
-        self.locked { () -> Void in
+        self.locked {
             for lane in 0..<self.capacity {
                 self.accumulators[lane].discard()
             }
@@ -446,7 +448,7 @@ public final class HistoryAccumulatorTable {
     /// Folds a whole tick under one lock acquisition.
     public func fold(_ sink: HistorySink, at now: TimeInterval, interval: TimeInterval) {
         guard !sink.isEmpty else { return }
-        self.locked { () -> Void in
+        self.locked {
             for sample in sink.samples {
                 _ = self.foldLocked(lane: Int(sample.lane), value: sample.value, at: now, interval: interval)
             }

@@ -466,7 +466,7 @@ public final class HistorySleepMonitor {
     /// image is the one both callers wanted there.
     private func change(_ body: () -> Bool) {
         var pending: (revision: UInt64, bytes: [UInt8])?
-        self.locked { () -> Void in
+        self.locked {
             guard body() else { return }
             self.ageCapLocked()
             self.revision &+= 1

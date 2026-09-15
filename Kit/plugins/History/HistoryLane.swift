@@ -238,7 +238,7 @@ public struct HistoryLaneEntry {
         let start = offset + offsetLabel
         let label: String
         if length > 0, start + length <= bytes.count {
-            label = String(decoding: bytes[start..<(start + length)], as: UTF8.self)
+            label = String(bytes: bytes[start..<(start + length)], encoding: .utf8) ?? ""
         } else {
             label = ""
         }
