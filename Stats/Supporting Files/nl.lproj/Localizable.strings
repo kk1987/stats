@@ -567,6 +567,9 @@
 "Reduce stored history text" = "The 30-day and 1-year history will be permanently deleted. The last 24 hours is kept. Are you sure you want to do this?";
 "History retention could not be changed" = "The retention setting was saved and will be used the next time Stats starts recording, but the stored history could not be changed right now.";
 "History retention was only partly changed" = "The history the smaller setting discards has been deleted, but Stats could not finish the change. The retention setting was saved and is used the next time Stats starts recording.";
+"Export CSV" = "Export CSV";
+"Stats history %0" = "Stats history %0";
+"History could not be exported" = "The visible range could not be written to that file.";
 "Install fan helper" = "Installeer het ventilator-hulpprogramma";
 "Uninstall fan helper" = "Verwijder het ventilator-hulpprogramma.";
 "Fan value" = "Waarde van de ventilator"; // translategemma:4b
