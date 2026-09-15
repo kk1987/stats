@@ -1192,7 +1192,7 @@ public func historyExpandButton(for module: ModuleType) -> NSView {
 
 private final class HistoryWindowContentView: NSView {
     private static let sidebarWidth: CGFloat = 220
-    private static let readoutWidth: CGFloat = 250
+    private static let readoutWidth: CGFloat = 300
     private static let topBarHeight: CGFloat = 30
     private static let margin: CGFloat = 8
 
@@ -1300,10 +1300,18 @@ private final class HistoryWindowContentView: NSView {
         let plot = NSView()
         plot.addSubview(self.chart)
         plot.addSubview(self.gapLabel)
+        // The plot has no intrinsic width: it is whatever the window leaves
+        // between the two fixed columns. `.fill` makes the stack hand it that
+        // slack (the default `.gravityAreas` sizes it to zero and leaves the
+        // remainder empty), and the priorities say the plot is the view that
+        // stretches and shrinks, never the sidebar or the readout.
+        plot.setContentHuggingPriority(.init(1), for: .horizontal)
+        plot.setContentCompressionResistancePriority(.init(1), for: .horizontal)
 
         let body = NSStackView()
         body.orientation = .horizontal
         body.alignment = .top
+        body.distribution = .fill
         body.spacing = HistoryWindowContentView.margin
         body.addArrangedSubview(self.sidebar)
         body.addArrangedSubview(plot)
@@ -1951,10 +1959,13 @@ private final class HistoryReadoutView: NSView, NSTableViewDataSource, NSTableVi
         self.table.allowsColumnSelection = false
         self.table.style = .plain
 
-        self.table.addTableColumn(HistoryReadoutView.column(.lane, title: localizedString("Lane"), width: 110))
-        self.table.addTableColumn(HistoryReadoutView.column(.min, title: localizedString("Min"), width: 42))
-        self.table.addTableColumn(HistoryReadoutView.column(.avg, title: localizedString("Avg"), width: 42))
-        self.table.addTableColumn(HistoryReadoutView.column(.max, title: localizedString("Max"), width: 42))
+        // Three value columns wide enough for "1.23 GB/s"; the lane column
+        // absorbs whatever the readout has left.
+        self.table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        self.table.addTableColumn(HistoryReadoutView.column(.lane, title: localizedString("Lane"), width: 120))
+        self.table.addTableColumn(HistoryReadoutView.column(.min, title: localizedString("Min"), width: 56))
+        self.table.addTableColumn(HistoryReadoutView.column(.avg, title: localizedString("Avg"), width: 56))
+        self.table.addTableColumn(HistoryReadoutView.column(.max, title: localizedString("Max"), width: 56))
 
         self.scroll.documentView = self.table
         self.scroll.hasVerticalScroller = true
