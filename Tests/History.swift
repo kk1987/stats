@@ -1721,6 +1721,247 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(recorder.status, .recording)
     }
 
+    // MARK: - daily network traffic (#3450)
+    //
+    // The counter #3450 asks for is not a lane: it is summed, not averaged,
+    // rolls at local midnight computed from the current calendar, and lives in
+    // its own append-only file. What these cover is what §5 promises about it —
+    // the arithmetic, the two boundary cases a cached `+86400` gets wrong (a
+    // DST day and a flight), and the file surviving both a relaunch and a crash
+    // in the middle of a write.
+
+    /// The bytes come from the payload's own per-tick delta, and the ticks the
+    /// Net conformance drops — an unreachable link, the first sample after an
+    /// interface change — never reach it at all.
+    func testDailyTrafficAccumulatesAcrossTicks() throws {
+        let probe = try self.probe()
+        defer { probe.recorder.stop() }
+
+        probe.ingest(10, traffic: HistoryTraffic(upload: 1_000, download: 4_000))
+        probe.ingest(20, traffic: HistoryTraffic(upload: 500, download: 1_500))
+        // A payload the conformance emitted no traffic for, and the link-rate
+        // guard's zero, which at this hook is an idle link.
+        probe.ingest(30)
+        probe.ingest(40, traffic: .none)
+
+        let totals = probe.recorder.dailyTraffic
+        XCTAssertEqual(totals.today, HistoryTraffic(upload: 1_500, download: 5_500))
+        XCTAssertEqual(totals.yesterday, .none)
+        // Not a lane, and it costs none: the lane count is the one lane the
+        // probe registers, and the archive has no column for the counter.
+        XCTAssertEqual(probe.recorder.laneCount, 1)
+    }
+
+    /// A relaunch at noon continues the morning's figure. The file is inside the
+    /// directory the settings readout sums, and it is not a lane.
+    func testDailyTrafficSurvivesARelaunch() throws {
+        let directory = self.folder.appendingPathComponent("history")
+        let first = try self.probe(directory: directory)
+        first.ingest(1, traffic: HistoryTraffic(upload: 700, download: 300))
+        first.recorder.stop()
+
+        let file = directory.appendingPathComponent(HistoryDailyTraffic.fileName)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertGreaterThan(first.store.bytesOnDisk, 0)
+
+        let second = try self.probe(directory: directory, now: first.now + 120)
+        defer { second.recorder.stop() }
+        XCTAssertEqual(second.recorder.dailyTraffic.today, HistoryTraffic(upload: 700, download: 300))
+
+        second.ingest(2, traffic: HistoryTraffic(upload: 1, download: 2))
+        XCTAssertEqual(second.recorder.dailyTraffic.today, HistoryTraffic(upload: 701, download: 302))
+
+        // Deleting the history deletes the counter with it: its file was in the
+        // directory that was just emptied.
+        XCTAssertTrue(second.recorder.deleteAll())
+        XCTAssertEqual(second.recorder.dailyTraffic.today, .none)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    /// Midnight, in the zone the machine is actually in. A sample that arrives
+    /// after it but before the next commit tick belongs to the day that has just
+    /// started, which is what `pending` exists for.
+    func testDailyTrafficRollsOverAtLocalMidnight() throws {
+        let counter = self.dailyCounter(.berlin)
+        let evening = HistoryTests.instant(.berlin, "2026-05-11 23:59:00")
+        counter.load(at: evening)
+
+        counter.add(HistoryTraffic(upload: 100, download: 900), at: evening)
+        XCTAssertEqual(counter.totals(at: evening).today, HistoryTraffic(upload: 100, download: 900))
+
+        let night = HistoryTests.instant(.berlin, "2026-05-12 00:00:30")
+        counter.add(HistoryTraffic(upload: 7, download: 3), at: night)
+        let totals = counter.totals(at: night)
+        XCTAssertEqual(totals.today, HistoryTraffic(upload: 7, download: 3))
+        XCTAssertEqual(totals.yesterday, HistoryTraffic(upload: 100, download: 900))
+        XCTAssertEqual(counter.days.map { $0.day }, [20_260_511, 20_260_512])
+    }
+
+    /// The day the clocks go forward is 23 hours long and the day they go back
+    /// is 25, because the day after local midnight is what the calendar says it
+    /// is — not midnight plus 86,400.
+    func testDailyTrafficDayLengthFollowsDST() throws {
+        // Central European Summer Time starts on 2026-03-29 and ends on
+        // 2026-10-25, both at 02:00 local.
+        let spring = HistoryTests.instant(.berlin, "2026-03-29 00:00:00")
+        XCTAssertEqual(HistoryTests.instant(.berlin, "2026-03-30 00:00:00") - spring, 23 * 3_600)
+        let autumn = HistoryTests.instant(.berlin, "2026-10-25 00:00:00")
+        XCTAssertEqual(HistoryTests.instant(.berlin, "2026-10-26 00:00:00") - autumn, 25 * 3_600)
+
+        let short = self.dailyCounter(.berlin, name: "spring.bin")
+        short.load(at: spring + 1_800)
+        short.add(HistoryTraffic(upload: 1, download: 2), at: spring + 1_800)
+        // 23 hours in, the short day is over and a cached +86400 would still be
+        // an hour away from admitting it.
+        short.add(HistoryTraffic(upload: 5, download: 6), at: spring + 23 * 3_600)
+        let rolled = short.totals(at: spring + 23 * 3_600)
+        XCTAssertEqual(rolled.today, HistoryTraffic(upload: 5, download: 6))
+        XCTAssertEqual(rolled.yesterday, HistoryTraffic(upload: 1, download: 2))
+
+        let long = self.dailyCounter(.berlin, name: "autumn.bin")
+        long.load(at: autumn + 60)
+        long.add(HistoryTraffic(upload: 3, download: 4), at: autumn + 60)
+        // 24 hours in, the long day is still going, and the two samples are the
+        // same day's.
+        long.add(HistoryTraffic(upload: 10, download: 20), at: autumn + 24 * 3_600)
+        let held = long.totals(at: autumn + 24 * 3_600)
+        XCTAssertEqual(held.today, HistoryTraffic(upload: 13, download: 24))
+        XCTAssertEqual(held.yesterday, .none)
+    }
+
+    /// A flight, not a clock change: the wall clock never moves, the zone does,
+    /// and the counter re-anchors on the next roll rather than at the next
+    /// midnight of the zone it left.
+    func testDailyTrafficReanchorsOnATimeZoneChange() throws {
+        var zone: Zone = .berlin
+        let counter = HistoryDailyTraffic(url: self.folder.appendingPathComponent("daily.bin"),
+                                          calendar: { HistoryTests.calendar(zone) })
+
+        // 01:30 on the 11th in Berlin is 19:30 on the 10th in New York.
+        let ts = HistoryTests.instant(.berlin, "2026-05-11 01:30:00")
+        counter.load(at: ts)
+        counter.add(HistoryTraffic(upload: 40, download: 60), at: ts)
+        XCTAssertEqual(counter.totals(at: ts).today, HistoryTraffic(upload: 40, download: 60))
+
+        zone = .newYork
+        let totals = counter.totals(at: ts)
+        // The same instant is now a day earlier, and that day has nothing in it.
+        XCTAssertEqual(totals.today, .none)
+        XCTAssertEqual(totals.yesterday, .none)
+        // Nothing was lost: the bytes are still the 11th's.
+        XCTAssertEqual(counter.days.map { $0.day }, [20_260_511])
+
+        counter.add(HistoryTraffic(upload: 1, download: 2), at: ts)
+        XCTAssertEqual(counter.totals(at: ts).today, HistoryTraffic(upload: 1, download: 2))
+        XCTAssertEqual(counter.days.map { $0.day }, [20_260_510, 20_260_511])
+    }
+
+    /// The file is append-only and a later record for a day supersedes an
+    /// earlier one, which is what a round trip has to come back with.
+    func testDailyTrafficRoundTripsThroughItsFile() throws {
+        let url = self.folder.appendingPathComponent("daily.bin")
+        let first = HistoryTests.instant(.utc, "2026-05-10 12:00:00")
+        let second = HistoryTests.instant(.utc, "2026-05-11 12:00:00")
+
+        let counter = self.dailyCounter(.utc)
+        counter.load(at: first)
+        counter.add(HistoryTraffic(upload: 10, download: 20), at: first)
+        counter.commit(at: first, force: true)
+        counter.add(HistoryTraffic(upload: 5, download: 5), at: first + 60)
+        counter.commit(at: first + 60, force: true)
+        counter.add(HistoryTraffic(upload: 1, download: 2), at: second)
+        counter.commit(at: second, force: true)
+
+        // Three records for two days: 16 B of header and 24 B each.
+        XCTAssertEqual(try Self.fileSize(at: url), 16 + 3 * 24)
+
+        let reopened = self.dailyCounter(.utc)
+        reopened.load(at: second)
+        let totals = reopened.totals(at: second)
+        XCTAssertEqual(totals.today, HistoryTraffic(upload: 1, download: 2))
+        XCTAssertEqual(totals.yesterday, HistoryTraffic(upload: 15, download: 25))
+        XCTAssertEqual(reopened.days.map { $0.day }, [20_260_510, 20_260_511])
+    }
+
+    /// A `kill -9` in the middle of an append leaves half a record at the tail.
+    /// It is dropped, everything before it survives, and the next write rewrites
+    /// the file rather than appending onto a misaligned tail.
+    func testATornLastDailyRecordIsDropped() throws {
+        let url = self.folder.appendingPathComponent("daily.bin")
+        let first = HistoryTests.instant(.utc, "2026-05-10 12:00:00")
+        let second = HistoryTests.instant(.utc, "2026-05-11 12:00:00")
+
+        let counter = self.dailyCounter(.utc)
+        counter.load(at: first)
+        counter.add(HistoryTraffic(upload: 10, download: 20), at: first)
+        counter.commit(at: first, force: true)
+        counter.add(HistoryTraffic(upload: 1, download: 2), at: second)
+        counter.commit(at: second, force: true)
+
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data([0x20, 0x26, 0x05, 0x12, 0xFF]))
+        try handle.close()
+
+        let torn = self.dailyCounter(.utc)
+        torn.load(at: second)
+        let totals = torn.totals(at: second)
+        XCTAssertEqual(totals.today, HistoryTraffic(upload: 1, download: 2))
+        XCTAssertEqual(totals.yesterday, HistoryTraffic(upload: 10, download: 20))
+
+        // The next persist compacts rather than appending, so the file is a
+        // whole number of records again: one per day.
+        torn.add(HistoryTraffic(upload: 4, download: 4), at: second)
+        torn.commit(at: second, force: true)
+        XCTAssertEqual(try Self.fileSize(at: url), 16 + 2 * 24)
+
+        let reopened = self.dailyCounter(.utc)
+        reopened.load(at: second)
+        XCTAssertEqual(reopened.totals(at: second).today, HistoryTraffic(upload: 5, download: 6))
+        XCTAssertEqual(reopened.days.map { $0.day }, [20_260_510, 20_260_511])
+    }
+
+    /// A record whose bytes rotted is not a record: the day falls back to the
+    /// last one that still checksums, rather than to a number nothing wrote.
+    func testADamagedDailyRecordFallsBackToTheLastGoodOne() throws {
+        let url = self.folder.appendingPathComponent("daily.bin")
+        let day = HistoryTests.instant(.utc, "2026-05-10 12:00:00")
+
+        let counter = self.dailyCounter(.utc)
+        counter.load(at: day)
+        counter.add(HistoryTraffic(upload: 10, download: 20), at: day)
+        counter.commit(at: day, force: true)
+        counter.add(HistoryTraffic(upload: 5, download: 5), at: day + 60)
+        counter.commit(at: day + 60, force: true)
+
+        // A bit inside the second record's upload field. The header is 16 B and
+        // records are 24 B, so the second one starts at 40.
+        try Self.flipBit(at: url, byte: 40 + 4, bit: 2)
+
+        let reopened = self.dailyCounter(.utc)
+        reopened.load(at: day)
+        XCTAssertEqual(reopened.totals(at: day).today, HistoryTraffic(upload: 10, download: 20))
+    }
+
+    // MARK: - daily traffic fixtures
+
+    private func dailyCounter(_ zone: Zone, name: String = "daily.bin") -> HistoryDailyTraffic {
+        HistoryDailyTraffic(url: self.folder.appendingPathComponent(name),
+                            calendar: { HistoryTests.calendar(zone) })
+    }
+
+    /// A wall-clock instant written the way a person reads it, in the zone the
+    /// test is pinned to.
+    private static func instant(_ zone: Zone, _ text: String) -> TimeInterval {
+        let calendar = HistoryTests.calendar(zone)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.date(from: text)?.timeIntervalSince1970 ?? 0
+    }
+
     // MARK: - sleep, wake and the clock
     //
     // A simulated nine-hour sleep; a backward clock jump inside a tier's window
@@ -2278,12 +2519,20 @@ final class HistoryTests: XCTestCase {
 
         let source: String
         let value: Double
+        /// What this tick moved, for the daily counter. Empty for every test
+        /// that is not about #3450, which is what the Net conformance does for
+        /// a payload whose delta cannot be trusted.
+        var traffic: HistoryTraffic = .none
 
-        static func payload(_ value: Double, source: String = "") -> Probe {
-            Probe(source: source, value: value)
+        static func payload(_ value: Double, source: String = "",
+                            traffic: HistoryTraffic = .none) -> Probe {
+            Probe(source: source, value: value, traffic: traffic)
         }
 
         func emitHistory(reader: HistoryReaderKey, into sink: inout HistorySink) {
+            if !self.traffic.isEmpty {
+                sink.emitTraffic(upload: self.traffic.upload, download: self.traffic.download)
+            }
             let descriptor = HistoryLaneDescriptor(
                 key: HistoryLaneKey(module: .cpu, source: self.source, metric: "total"),
                 unit: .percent, kind: .gauge, label: Probe.label
@@ -2310,7 +2559,8 @@ final class HistoryTests: XCTestCase {
         var isPowerConstrained = false
         let start: TimeInterval
 
-        init(directory: URL, preset: HistoryRetentionPreset, now: TimeInterval) {
+        init(directory: URL, preset: HistoryRetentionPreset, now: TimeInterval,
+             calendar: @escaping () -> Calendar = { HistoryTests.calendar(.utc) }) {
             self.now = now
             self.start = now
             self.freeSpace = HistoryStore.freeSpaceFloor * 100
@@ -2324,7 +2574,7 @@ final class HistoryTests: XCTestCase {
                 availableSpace: { _ in box.probe?.freeSpace },
                 isPowerConstrained: { box.probe?.isPowerConstrained ?? false },
                 monotonicNow: { box.probe?.monotonic ?? now }
-            ))
+            ), calendar: calendar)
             box.probe = self
         }
 
@@ -2344,8 +2594,9 @@ final class HistoryTests: XCTestCase {
         /// One reader tick followed by the commit cycle that closes its bucket,
         /// which is the shape every recorder test needs: a bucket the commit
         /// thread has not seen close yet is still open and writes nothing.
-        func ingest(_ value: Double) {
-            self.recorder.ingest(Probe.payload(value), reader: Probe.reader, interval: 1)
+        func ingest(_ value: Double, traffic: HistoryTraffic = .none) {
+            self.recorder.ingest(Probe.payload(value, traffic: traffic),
+                                 reader: Probe.reader, interval: 1)
             self.advance(HistoryRecorder.commitInterval)
             self.recorder.commitNow()
         }
@@ -2367,14 +2618,31 @@ final class HistoryTests: XCTestCase {
     /// app's real preferences: a developer who turns the switch off in Stats
     /// would otherwise find the whole suite red with no code change.
     private func probe(directory: URL? = nil, preset: HistoryRetentionPreset = .standard,
-                      now: TimeInterval? = nil) throws -> RecorderProbe {
+                       now: TimeInterval? = nil,
+                       calendar: @escaping () -> Calendar = { HistoryTests.calendar(.utc) }) throws -> RecorderProbe {
         let directory = directory ?? self.folder.appendingPathComponent("history")
         let aligned = (1_760_000_000 / TimeInterval(HistoryTier.t2.step)).rounded(.down)
             * TimeInterval(HistoryTier.t2.step) + 5
-        let probe = RecorderProbe(directory: directory, preset: preset, now: now ?? aligned)
+        let probe = RecorderProbe(directory: directory, preset: preset, now: now ?? aligned,
+                                  calendar: calendar)
         probe.recorder.start(enabled: true)
         probe.recorder.waitUntilIdle()
         return probe
+    }
+
+    /// The time zones the daily-counter tests pin. A test that let the
+    /// machine's own zone decide would pass in Berlin and fail in Auckland, and
+    /// the DST cases would only be reachable from one of them.
+    private enum Zone: String {
+        case utc = "UTC"
+        case berlin = "Europe/Berlin"
+        case newYork = "America/New_York"
+    }
+
+    private static func calendar(_ zone: Zone) -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        if let timeZone = TimeZone(identifier: zone.rawValue) { calendar.timeZone = timeZone }
+        return calendar
     }
 
     // MARK: - column plan and the read-side query
