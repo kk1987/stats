@@ -570,6 +570,9 @@
 "Export CSV" = "Export CSV";
 "Stats history %0" = "Stats history %0";
 "History could not be exported" = "The visible range could not be written to that file.";
+"Today" = "Today";
+"Yesterday" = "Yesterday";
+"Daily traffic note" = "Counted by Stats while it was running: sleep and any time Stats was not running are not included.";
 "Install fan helper" = "Installeer het ventilator-hulpprogramma";
 "Uninstall fan helper" = "Verwijder het ventilator-hulpprogramma.";
 "Fan value" = "Waarde van de ventilator"; // translategemma:4b

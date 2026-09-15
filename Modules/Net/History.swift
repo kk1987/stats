@@ -7,7 +7,7 @@
 //  Design: docs/usage-history-design.md (§2 Sampling), exelban/stats#1194.
 //
 
-import Foundation
+import Cocoa
 import Kit
 
 // MARK: - lanes
@@ -15,9 +15,10 @@ import Kit
 // UsageReader: `<iface>.up` and `<iface>.down` as rate lanes, keyed by BSD
 // name. What is emitted is the per-tick byte delta, not a rate: the recorder
 // divides by the time actually elapsed since that lane's previous sample,
-// bounded by the reader's interval (§2). The daily byte counter #3450 asks for
-// is the recorder's own accumulator, fed from these samples; nothing here
-// writes it.
+// bounded by the reader's interval (§2). The same delta feeds the daily byte
+// counter #3450 asks for — `sink.emitTraffic` below — which is the recorder's
+// own accumulator and not a lane: it is summed rather than averaged, rolls at
+// local midnight and keeps no per-interface breakdown.
 //
 // Three distinct conditions all reach `callback` as `bandwidth == 0`, and §2
 // splits them three ways:
@@ -121,6 +122,16 @@ extension Network_Usage: HistoryProvider {
         }
 
         let ts = sink.timestamp
+        // #3450's day counter, fed before the lanes and independently of them:
+        // it takes this tick's bytes whether or not a lane could be resolved
+        // for them, which at the 256-lane cap is the difference between a
+        // daily total and nothing. The two guards above are what keep the
+        // reader's substituted zeros out of it — an unreachable link and the
+        // first sample after an interface change are not measurements of zero
+        // traffic — and the link-rate guard's zero costs it that tick's bytes,
+        // which §2 accepts here for the same reason it accepts it in the lane.
+        sink.emitTraffic(upload: self.bandwidth.upload, download: self.bandwidth.download)
+
         // The label is built inside the descriptor, which runs only when a
         // lane is actually being resolved. Interpolating it on every tick
         // would put a string allocation on the hot path for a field that is
@@ -142,5 +153,120 @@ extension Network_Usage: HistoryProvider {
         }) {
             sink.emit(lane: lane, value: Double(self.bandwidth.download))
         }
+    }
+}
+
+// MARK: - daily totals in the popup (#3450)
+
+/// The two rows the Net popup shows under its totals: how many bytes went up
+/// and down today, and the same for yesterday.
+///
+/// It lives here rather than in `popup.swift` because it refreshes itself. The
+/// popup's own render path would have been the natural place to push a value
+/// from, but every line added to that file is a line to re-resolve on the next
+/// upstream rebase, and a view that builds its own rows and reads the counter
+/// itself costs that file exactly one `addArrangedSubview`.
+///
+/// Refreshing is gated on the popup actually being open. `.popupVisibilityChanged`
+/// fires for *every* module's popup, not just this one, so the notification only
+/// starts the timer and the timer stops itself on the first tick that finds no
+/// visible window — which is what a CPU popup opening leaves behind here.
+internal final class NetworkDailyTrafficView: NSStackView {
+    /// Two seconds rather than the popup's own one: these are daily totals, and
+    /// the read is two integers under a lock — but it is still a read on main
+    /// for a row nobody watches change.
+    private static let refreshInterval: TimeInterval = 2
+    private static let rowHeight: CGFloat = 22
+
+    private var todayField: ValueField?
+    private var yesterdayField: ValueField?
+    private var timer: Timer?
+    private var observer: NSObjectProtocol?
+
+    init(width: CGFloat) {
+        super.init(frame: NSRect(x: 0, y: 0, width: width,
+                                 height: NetworkDailyTrafficView.rowHeight * 2))
+        self.orientation = .vertical
+        self.spacing = 0
+        self.heightAnchor.constraint(equalToConstant: self.frame.height).isActive = true
+
+        let today = popupRow(self, title: "\(localizedString("Today")):", value: "-")
+        let yesterday = popupRow(self, title: "\(localizedString("Yesterday")):", value: "-")
+        self.todayField = today.1
+        self.yesterdayField = yesterday.1
+
+        // The caption the design asks for, on both halves of both rows: these
+        // are the bytes Stats itself counted, so they read below the interface
+        // totals two rows above and below whatever the ISP says.
+        let note = localizedString("Daily traffic note")
+        for field in [today.0, yesterday.0] as [NSView] { field.toolTip = note }
+        for field in [today.1, yesterday.1] as [NSView] { field.toolTip = note }
+
+        self.observer = NotificationCenter.default.addObserver(
+            forName: .popupVisibilityChanged, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let self = self else { return }
+            guard (notification.userInfo?["state"] as? Bool) ?? false else {
+                self.stopRefreshing()
+                return
+            }
+            self.refresh()
+            self.startRefreshing()
+        }
+        self.refresh()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        self.stopRefreshing()
+        if let observer = self.observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    private func startRefreshing() {
+        guard self.timer == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: NetworkDailyTrafficView.refreshInterval,
+                                         repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            guard self.window?.isVisible ?? false else {
+                self.stopRefreshing()
+                return
+            }
+            self.refresh()
+        }
+        timer.tolerance = NetworkDailyTrafficView.refreshInterval / 2
+        self.timer = timer
+    }
+
+    private func stopRefreshing() {
+        self.timer?.invalidate()
+        self.timer = nil
+    }
+
+    /// Reads the recorder's in-memory counter — no file, no queue hop — and
+    /// writes the two fields only when the text has actually moved.
+    private func refresh() {
+        let recorder = HistoryRecorder.shared
+        let totals = recorder.dailyTraffic
+        let recording = recorder.isRecording
+        let today = NetworkDailyTrafficView.value(totals.today, recording: recording)
+        let yesterday = NetworkDailyTrafficView.value(totals.yesterday, recording: recording)
+
+        if self.todayField?.stringValue != today { self.todayField?.stringValue = today }
+        if self.yesterdayField?.stringValue != yesterday { self.yesterdayField?.stringValue = yesterday }
+    }
+
+    /// "↑ 1,2 GB   ↓ 8,4 GB". The arrows carry the direction because the row
+    /// has one value field for both of them, and a zero day with recording
+    /// switched off is *unknown*, not zero: nothing was counting.
+    private static func value(_ traffic: HistoryTraffic, recording: Bool) -> String {
+        guard recording || !traffic.isEmpty else { return localizedString("Unavailable") }
+        let upload = Units(bytes: traffic.upload).getReadableMemory()
+        let download = Units(bytes: traffic.download).getReadableMemory()
+        return "↑ \(upload)   ↓ \(download)"
     }
 }

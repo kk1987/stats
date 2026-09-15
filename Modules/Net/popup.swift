@@ -271,6 +271,8 @@ internal class Popup: PopupWrapper {
         self.totalDownloadLabel = totalDownload.1
         self.totalDownloadField = totalDownload.2
         
+        view.addArrangedSubview(NetworkDailyTrafficView(width: self.frame.width))
+        
         self.statusField = popupBadgeRow(view, title: "\(localizedString("Status")):").1
         self.connectivityField = popupBadgeRow(view, title: "\(localizedString("Internet connection")):").1
         self.latencyField = popupRow(view, title: "\(localizedString("Latency")):", value: "0 ms").1

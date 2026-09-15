@@ -29,6 +29,44 @@ public struct HistoryReaderKey: Hashable {
     }
 }
 
+// MARK: - traffic
+
+/// A pair of byte counters, used both for what one tick delivered and for what
+/// a whole day has accumulated (§5, exelban/stats#3450).
+///
+/// Adding saturates and ignores a negative delta: this is the arithmetic of a
+/// counter that may only ever go up, and a byte total that wrapped to a huge
+/// negative number would be a worse answer than one that stopped at `Int64.max`
+/// — which is 8 EB, and therefore not a number any interface reaches.
+public struct HistoryTraffic: Equatable {
+    public static let none = HistoryTraffic(upload: 0, download: 0)
+
+    public var upload: Int64
+    public var download: Int64
+
+    public init(upload: Int64, download: Int64) {
+        self.upload = upload
+        self.download = download
+    }
+
+    public var isEmpty: Bool { self.upload == 0 && self.download == 0 }
+
+    public mutating func add(upload: Int64, download: Int64) {
+        self.upload = HistoryTraffic.saturating(self.upload, upload)
+        self.download = HistoryTraffic.saturating(self.download, download)
+    }
+
+    public mutating func add(_ other: HistoryTraffic) {
+        self.add(upload: other.upload, download: other.download)
+    }
+
+    private static func saturating(_ total: Int64, _ delta: Int64) -> Int64 {
+        guard delta > 0 else { return total }
+        let (sum, overflow) = total.addingReportingOverflow(delta)
+        return overflow ? Int64.max : sum
+    }
+}
+
 // MARK: - extraction
 
 /// The pre-sized buffer a payload writes its scalars into. Lanes resolve to
@@ -50,6 +88,17 @@ public struct HistorySink {
     /// Wall clock of the tick, in whole seconds: what a lane registered during
     /// this tick stamps its `lastUsedTs` with.
     public private(set) var timestamp: UInt64 = 0
+
+    /// The per-tick byte deltas the daily counter is fed from (§5).
+    ///
+    /// A second channel rather than a lane, because it answers a different
+    /// question: the lanes hold a rate over a bucket that ages out with the
+    /// tier, and #3450 asks for an untouched sum of bytes over a calendar day.
+    /// Integrating it back out of averaged buckets would inherit every
+    /// resampling and rollup rounding the chart is allowed to make, and the two
+    /// figures would then disagree by a few percent with no way to say which
+    /// was right.
+    public private(set) var traffic: HistoryTraffic = .none
 
     /// Strong on purpose. `inout` passing neither copies nor retains, so this
     /// costs one retain per tick rather than one per sample.
@@ -73,6 +122,7 @@ public struct HistorySink {
     /// sink the recorder owns is that steady state allocates nothing.
     public mutating func prepare(registry: HistoryLaneRegistry?, at timestamp: UInt64) {
         self.samples.removeAll(keepingCapacity: true)
+        self.traffic = .none
         self.registry = registry
         self.timestamp = timestamp
     }
@@ -88,6 +138,18 @@ public struct HistorySink {
     public mutating func emit(lane: Int32, value: Double) {
         guard lane >= 0, value.isFinite else { return }
         self.samples.append(Sample(lane: lane, value: value))
+    }
+
+    /// The bytes this tick actually moved, for the daily counter (§5).
+    ///
+    /// Only a payload that knows its delta is trustworthy calls this: the Net
+    /// conformance emits nothing for an unreachable link or the first sample
+    /// after an interface change, because both arrive as a substituted zero
+    /// that is not a measurement (§2). The link-rate guard's zero is a genuine
+    /// zero here — indistinguishable from an idle link at this hook — so it
+    /// costs the counter that tick's bytes and nothing else.
+    public mutating func emitTraffic(upload: Int64, download: Int64) {
+        self.traffic.add(upload: upload, download: download)
     }
 
     // MARK: - lane resolution (key -> integer id, first sight only)
