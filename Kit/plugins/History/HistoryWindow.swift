@@ -1206,6 +1206,7 @@ private final class HistoryWindowContentView: NSView {
     private let rangeControl: NSSegmentedControl
     private let bandToggle: NSButton
     private let liveControl: NSSegmentedControl
+    private let exportButton: NSButton
     private let sidebar = HistoryLaneSidebarView()
     private let chart = HistoryChartView(frame: .zero)
     private let readout = HistoryReadoutView()
@@ -1217,6 +1218,10 @@ private final class HistoryWindowContentView: NSView {
     private var pinnedEnd: TimeInterval?
     private var module: HistoryLaneModule?
     private var drawnLanes: [HistoryChartView.Lane] = []
+    /// The plan the drawn columns were cut to. Kept so that the export writes
+    /// the range on screen rather than one re-planned against the clock while
+    /// the save panel was open.
+    private var plan: HistoryColumnPlan?
     private var spans: [HistoryGapSpan] = []
     private var timer: Timer?
     /// Stamped on every read and compared when the columns come back, so a
@@ -1238,6 +1243,7 @@ private final class HistoryWindowContentView: NSView {
             labels: [localizedString("Live"), localizedString("Pinned")],
             trackingMode: .selectOne, target: nil, action: nil
         )
+        self.exportButton = NSButton(title: localizedString("Export CSV"), target: nil, action: nil)
         super.init(frame: frameRect)
 
         self.rangeControl.target = self
@@ -1251,6 +1257,13 @@ private final class HistoryWindowContentView: NSView {
         self.liveControl.target = self
         self.liveControl.action = #selector(self.liveChanged)
         self.liveControl.selectedSegment = 0
+
+        self.exportButton.target = self
+        self.exportButton.action = #selector(self.exportCSV)
+        self.exportButton.bezelStyle = .rounded
+        // Nothing checked is an empty file with a one-word header line, which
+        // is a worse answer than a button that says it has nothing to write.
+        self.exportButton.isEnabled = false
 
         self.gapLabel.alignment = .center
         self.gapLabel.font = .systemFont(ofSize: 11, weight: .regular)
@@ -1296,6 +1309,7 @@ private final class HistoryWindowContentView: NSView {
         topBar.addArrangedSubview(spacer)
         topBar.addArrangedSubview(self.bandToggle)
         topBar.addArrangedSubview(self.liveControl)
+        topBar.addArrangedSubview(self.exportButton)
 
         let plot = NSView()
         plot.addSubview(self.chart)
@@ -1524,6 +1538,8 @@ private final class HistoryWindowContentView: NSView {
             return HistoryChartView.Lane(columns: columns, color: module.laneColor(offset: offset))
         }
 
+        self.plan = result.plan
+        self.exportButton.isEnabled = !self.drawnLanes.isEmpty
         self.chart.setLanes(self.drawnLanes, plan: result.plan)
         self.readout.setLanes(self.drawnLanes, plan: result.plan)
         // `setLanes` clears the crosshair, which is the honest thing on a live
@@ -1609,6 +1625,15 @@ private final class HistoryWindowContentView: NSView {
 
     @objc private func bandToggled(_ sender: NSButton) {
         self.chart.showsMinMaxBand = sender.state == .on
+    }
+
+    /// §5's Export CSV. The lanes are the checked ones in the order they are
+    /// drawn and the plan is the one on screen, so the file is what the window
+    /// is showing and not a second, differently-aligned read of the same range.
+    @objc private func exportCSV(_ sender: NSButton) {
+        guard let plan = self.plan, !self.drawnLanes.isEmpty else { return }
+        HistoryCSVExporter().save(lanes: self.drawnLanes.map { $0.columns.lane }, plan: plan,
+                                  in: self.window)
     }
 
     @objc private func liveChanged(_ sender: NSSegmentedControl) {

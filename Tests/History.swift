@@ -2634,6 +2634,216 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(HistoryLaneUnit.volts.format(11.25), "11.250 V")
     }
 
+    // MARK: - CSV export
+    //
+    // The file is a public contract (§5): fixed English header tokens, one row
+    // per drawn column, values in the unit they were recorded in with a "."
+    // decimal separator whatever the app runs in, and a gap column that keeps a
+    // held or missing sample from reading as a measured one. Every assertion
+    // below is on the exact text, because "the format changed" is not
+    // something a user's script finds out gently.
+
+    /// `timestamp`, three cells per lane naming the lane, the statistic and the
+    /// stored unit, then `gap`.
+    func testTheHeaderLineNamesEveryLaneItsStatisticAndItsUnit() throws {
+        let lanes = [
+            Self.laneColumns("CPU total", unit: .percent, [nil]),
+            Self.laneColumns("Wi-Fi (en0) download", unit: .bytesPerSec, [nil], lane: 1)
+        ]
+
+        XCTAssertEqual(HistoryCSVExporter().header(for: lanes), """
+        timestamp,CPU total min (%),CPU total avg (%),CPU total max (%),\
+        Wi-Fi (en0) download min (B/s),Wi-Fi (en0) download avg (B/s),Wi-Fi (en0) download max (B/s),gap
+        """)
+
+        // No lane checked is still a well-formed file rather than a bare
+        // timestamp column.
+        XCTAssertEqual(HistoryCSVExporter().header(for: []), "timestamp,gap")
+    }
+
+    /// A measured row: the column's start in ISO 8601 with a numeric offset,
+    /// min/avg/max per lane in the unit the lane was recorded in, and an empty
+    /// gap cell.
+    func testAMeasuredRowCarriesMinAvgMaxInTheStoredUnit() throws {
+        let lanes = [
+            Self.laneColumns("CPU total", unit: .percent, [Self.measured(0.105, 0.2, 0.81)]),
+            Self.laneColumns("CPU die", unit: .celsius, [Self.measured(41, 45.5, 52.25)], lane: 1)
+        ]
+
+        // Percent is stored as a fraction of 1 and exported as 0–100; °C is
+        // exported as °C whatever the app displays, because a file whose
+        // numbers change meaning with a display setting is not a contract.
+        XCTAssertEqual(Self.exporter(offset: 2 * 3_600).row(0, plan: Self.csvPlan(columns: 1), lanes: lanes),
+                       "2023-11-15T00:13:20+02:00,10.50,20.00,81.00,41.00,45.50,52.25,")
+    }
+
+    /// One gap reason per row, and no values with it: a hatched column has
+    /// nothing to say about the series, and a zero there would be the one
+    /// mistake the whole feature exists to avoid.
+    func testEveryGapReasonHasItsOwnTokenAndNoValues() throws {
+        let plan = Self.csvPlan(columns: 1)
+        let exporter = Self.exporter()
+        let stamp = "2023-11-14T22:13:20+00:00"
+
+        let reasons: [(HistoryGapReason, String)] = [
+            (.asleep, "asleep"), (.notRunning, "not_running"),
+            (.clockStep, "clock_step"), (.nodata, "no_data")
+        ]
+        for (reason, token) in reasons {
+            let lanes = [Self.laneColumns("CPU total", unit: .percent, [Self.gap(reason)])]
+            XCTAssertEqual(exporter.row(0, plan: plan, lanes: lanes), "\(stamp),,,,\(token)", token)
+        }
+
+        // A lane the read had nothing at all for is the same three empty cells,
+        // and the row says so.
+        let missing = [Self.laneColumns("CPU total", unit: .percent, [nil])]
+        XCTAssertEqual(exporter.row(0, plan: plan, lanes: missing), "\(stamp),,,,no_data")
+
+        // A lane that ran out of columns — a plan wider than the answer — is
+        // the same, rather than an index out of range.
+        XCTAssertEqual(exporter.row(3, plan: Self.csvPlan(columns: 4), lanes: missing),
+                       "2023-11-14T22:14:20+00:00,,,,no_data")
+    }
+
+    /// A held bucket keeps its value: a step lane holds its last level for a
+    /// bounded window and that level is real. The token is what stops it
+    /// reading as a fresh measurement (§2).
+    func testAHeldRowKeepsItsValueAndSaysItIsHeld() throws {
+        let plan = Self.csvPlan(columns: 1)
+        let exporter = Self.exporter()
+        let battery = Self.laneColumns("Battery level", unit: .percent, [Self.held(0.42)])
+
+        XCTAssertEqual(exporter.row(0, plan: plan, lanes: [battery]),
+                       "2023-11-14T22:13:20+00:00,42.00,42.00,42.00,held")
+
+        // Held outranks a gap — the row has a value — and a measured lane
+        // outranks held, because one cell describes the whole row and a row
+        // something was measured in is a measured row.
+        let asleep = Self.laneColumns("CPU total", unit: .percent, [Self.gap(.asleep)], lane: 1)
+        XCTAssertEqual(exporter.row(0, plan: plan, lanes: [asleep, battery]),
+                       "2023-11-14T22:13:20+00:00,,,,42.00,42.00,42.00,held")
+
+        let cpu = Self.laneColumns("CPU total", unit: .percent, [Self.measured(0.1, 0.1, 0.1)], lane: 1)
+        XCTAssertEqual(exporter.row(0, plan: plan, lanes: [battery, cpu]),
+                       "2023-11-14T22:13:20+00:00,42.00,42.00,42.00,10.00,10.00,10.00,")
+    }
+
+    /// RFC 4180: a cell holding a comma, a quote or a line break is wrapped in
+    /// quotes with its own quotes doubled. Lane labels are volume and sensor
+    /// names the user or the vendor chose, so this is reachable and not theory.
+    func testCellsThatCouldSplitARowAreQuoted() throws {
+        XCTAssertEqual(HistoryCSVExporter.quoted("CPU die"), "CPU die")
+        XCTAssertEqual(HistoryCSVExporter.quoted("Macintosh HD, backup"), "\"Macintosh HD, backup\"")
+        XCTAssertEqual(HistoryCSVExporter.quoted("Tim\"s disk"), "\"Tim\"\"s disk\"")
+        XCTAssertEqual(HistoryCSVExporter.quoted("two\nlines"), "\"two\nlines\"")
+        // A CRLF inside a cell is one Swift grapheme cluster, so neither
+        // `contains("\r")` nor `contains("\n")` sees it: the cell that would
+        // end the row early is the one the obvious check waves through.
+        XCTAssertEqual(HistoryCSVExporter.quoted("two\r\nlines"), "\"two\r\nlines\"")
+
+        // And the header line is where a label reaches the file.
+        let lanes = [Self.laneColumns("Volume, \"spare\"", unit: .bytes, [nil])]
+        XCTAssertEqual(HistoryCSVExporter().header(for: lanes), """
+        timestamp,"Volume, ""spare"" min (B)","Volume, ""spare"" avg (B)","Volume, ""spare"" max (B)",gap
+        """)
+    }
+
+    /// The file is written in the C locale whatever the app runs in — and the
+    /// hazard is not hypothetical: `en_IN`'s decimal separator is already ".",
+    /// and it still writes 12,345.50, which is one value in two cells. The
+    /// timestamp has the same problem one level down: a fixed `dateFormat` is
+    /// not enough, because the locale still picks the calendar and the digits.
+    func testTheFileReadsInDotsAndGregorianYearsWhateverTheAppRunsIn() throws {
+        let plan = Self.csvPlan(columns: 1)
+        let lanes = [Self.laneColumns("Macintosh HD free", unit: .bytes,
+                                      [Self.measured(12_345.5, 12_345.5, 12_345.5)])]
+
+        for identifier in ["de_DE", "fr_CA", "ar_SA", "th_TH", "ne_NP", "en_IN"] {
+            let exporter = HistoryCSVExporter(locale: Locale(identifier: identifier),
+                                              timeZone: TimeZone(secondsFromGMT: 0)!)
+            XCTAssertEqual(exporter.row(0, plan: plan, lanes: lanes),
+                           "2023-11-14T22:13:20+00:00,12345.50,12345.50,12345.50,", identifier)
+        }
+
+        // What those locales do to the same number when they are allowed to
+        // reach the formatter, so that the pin above is not folklore.
+        XCTAssertEqual(String(format: "%.2f", locale: Locale(identifier: "de_DE"), 12_345.5), "12.345,50")
+        XCTAssertEqual(String(format: "%.2f", locale: Locale(identifier: "en_IN"), 12_345.5), "12,345.50")
+    }
+
+    /// The whole file: a header line, one row per drawn column in time order,
+    /// CRLF line endings and a trailing one.
+    func testTheDocumentIsAHeaderLineAndOneRowPerColumn() throws {
+        let plan = Self.csvPlan(columns: 3)
+        let lanes = [Self.laneColumns("CPU total", unit: .percent,
+                                      [Self.measured(0.1, 0.1, 0.1), nil, Self.gap(.asleep)])]
+        let exporter = Self.exporter()
+
+        let document = exporter.document(HistoryQueryResult(plan: plan, lanes: lanes))
+        XCTAssertTrue(document.hasSuffix("\r\n"))
+
+        let lines = document.components(separatedBy: "\r\n").dropLast()
+        XCTAssertEqual(lines.count, 4)
+        XCTAssertEqual(lines.first, exporter.header(for: lanes))
+
+        // Time-indexed: a row's position is its timestamp, one column width
+        // apart, and a column with nothing in it is empty rather than absent.
+        XCTAssertEqual(Array(lines)[1], "2023-11-14T22:13:20+00:00,10.00,10.00,10.00,")
+        XCTAssertEqual(Array(lines)[2], "2023-11-14T22:13:40+00:00,,,,no_data")
+        XCTAssertEqual(Array(lines)[3], "2023-11-14T22:14:00+00:00,,,,asleep")
+    }
+
+    /// A value the read path is willing to hand the exporter but no parser
+    /// could use: an empty cell, like any other column with nothing in it.
+    func testANonFiniteValueExportsAsAnEmptyCell() throws {
+        let exporter = Self.exporter()
+        XCTAssertEqual(exporter.value(.nan, unit: .watts), "")
+        XCTAssertEqual(exporter.value(.infinity, unit: .percent), "")
+        XCTAssertEqual(exporter.value(2_000, unit: .rpm), "2000.00")
+        XCTAssertEqual(exporter.value(-0.5, unit: .watts), "-0.50")
+    }
+
+    // MARK: - CSV fixtures
+
+    /// A fixed offset, so that a row's timestamp is an assertion and not a
+    /// function of where the machine running the tests is.
+    private static func exporter(offset: Int = 0) -> HistoryCSVExporter {
+        HistoryCSVExporter(locale: Locale(identifier: "en_US_POSIX"),
+                           timeZone: TimeZone(secondsFromGMT: offset)!)
+    }
+
+    /// T0 buckets from 1,700,000,000, two to a column: 20 s columns starting at
+    /// 2023-11-14T22:13:20Z.
+    private static func csvPlan(columns: Int) -> HistoryColumnPlan {
+        let first: UInt32 = 170_000_000
+        return HistoryColumnPlan(range: .hour, tier: .t0,
+                                 buckets: first..<(first + UInt32(columns * 2)), bucketsPerColumn: 2)
+    }
+
+    private static func laneColumns(_ label: String, unit: HistoryLaneUnit,
+                                    _ columns: [HistoryColumn?], lane: Int = 0) -> HistoryLaneColumns {
+        HistoryLaneColumns(
+            lane: lane,
+            entry: HistoryLaneEntry(identity: HistoryLaneIdentity(high: 0, low: UInt64(lane)),
+                                    module: .cpu, unit: unit, kind: .gauge, label: label),
+            columns: columns
+        )
+    }
+
+    private static func measured(_ min: Float, _ avg: Float, _ max: Float) -> HistoryColumn {
+        HistoryColumn(min: min, max: max, avg: avg, count: 12, reason: .measured)
+    }
+
+    private static func held(_ value: Float) -> HistoryColumn {
+        HistoryColumn(min: value, max: value, avg: value, count: 1, reason: .held)
+    }
+
+    /// What the read path produces for a column it could name a reason for:
+    /// no samples, so no values.
+    private static func gap(_ reason: HistoryGapReason) -> HistoryColumn {
+        HistoryColumn(min: 0, max: 0, avg: 0, count: 0, reason: reason)
+    }
+
     // MARK: - layout
     //
     // The slot and directory geometry is a format decision, not an
