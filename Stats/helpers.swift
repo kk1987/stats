@@ -158,6 +158,11 @@ extension AppDelegate {
     }
     
     internal func checkForNewVersion(silent: Bool = false) {
+        // Fork: the Tests target is hosted by Stats.app, and a test run at an
+        // older version than the latest release would otherwise download the
+        // dmg into ~/Downloads and start installing it over the user's copy.
+        guard !isRunningUnderTestHost else { return }
+
         updater.check { result, error in
             if error != nil {
                 debug("error updater.check(): \(error!.localizedDescription)")

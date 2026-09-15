@@ -686,6 +686,24 @@ public func syncShell(_ args: String) -> String {
     return output
 }
 
+/// True when this process is the host application of an XCTest bundle.
+///
+/// The `Tests` target is hosted by Stats.app, so a test run launches the real
+/// `AppDelegate` with the user's own defaults. Anything that acts on the
+/// world at launch — the update check that downloads and installs a release,
+/// the history recorder that opens the user's archive — has to stay idle in
+/// that process. Xcode sets the XCTest environment before the host starts,
+/// so this is decided long before `applicationDidFinishLaunching`; the class
+/// lookup covers a bundle injected into a process that was already running.
+public let isRunningUnderTestHost: Bool = {
+    let environment = ProcessInfo.processInfo.environment
+    for key in ["XCTestConfigurationFilePath", "XCTestBundlePath", "XCTestSessionIdentifier"]
+    where environment[key] != nil {
+        return true
+    }
+    return NSClassFromString("XCTestCase") != nil
+}()
+
 public func isNewestVersion(currentVersion: String, latestVersion: String) -> Bool {
     let currentNumber = currentVersion.replacingOccurrences(of: "v", with: "")
     let latestNumber = latestVersion.replacingOccurrences(of: "v", with: "")
