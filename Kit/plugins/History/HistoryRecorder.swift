@@ -169,18 +169,9 @@ public final class HistoryRecorder {
     /// other path free to open the user's archive from a test run. §9's budget
     /// for `AppDelegate` also stays at the two lines it names.
     ///
-    /// The environment variable is the reliable half: `xctest` sets it before
-    /// the host process starts, which is well before
-    /// `applicationDidFinishLaunching`. The class lookup is the fallback for a
-    /// bundle injected into a process that was already running.
-    public static let isRunningUnderTestHost: Bool = {
-        let environment = ProcessInfo.processInfo.environment
-        for key in ["XCTestConfigurationFilePath", "XCTestBundlePath", "XCTestSessionIdentifier"]
-        where environment[key] != nil {
-            return true
-        }
-        return NSClassFromString("XCTestCase") != nil
-    }()
+    /// The detection itself is `isRunningUnderTestHost` in Kit/helpers.swift,
+    /// shared with the app's update check, which has the same problem.
+    public static let isRunningUnderTestHost: Bool = Kit.isRunningUnderTestHost
 
     /// Whether `start` has to refuse. The test host suppresses the *shared*
     /// recorder — the one pointed at the user's own archive — and nothing else:
