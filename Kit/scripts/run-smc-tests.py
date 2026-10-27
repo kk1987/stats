@@ -53,6 +53,10 @@ def helper_source():
         "private func restoreFanModes(completion:",
         "public func uninstall(silent:",
     ))
+    # Defaults keys the extracted methods reference (fork: SMC helper re-registration).
+    keys = re.findall(r"^    private let \w+Key: String = .*$",
+                      swift_block(client, "public class SMCHelper {"), re.MULTILINE)
+    methods = "\n".join(keys) + "\n" + methods
     methods = methods.replace("private func", "func")
     methods = methods.replace('SMC.shared.getValue("FNum")', "FakeHelperEnvironment.current.fanCount")
     methods = methods.replace("if #available(macOS 13, *)", "if self.useModernService")
